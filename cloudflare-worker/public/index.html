@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Listing Scraper — API Tester</title>
+<style>
+  :root { --bg:#0f1218; --panel:#171c26; --panel2:#1e2532; --text:#e8ecf3;
+          --muted:#8b94a7; --accent:#ff5a5f; --accent2:#0071c2; --ok:#3fb47f;
+          --err:#e05252; --border:#2a3242; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--text);
+         font:15px/1.55 -apple-system,"Segoe UI",Roboto,sans-serif; padding:32px 16px; }
+  .wrap { max-width:1000px; margin:0 auto; }
+  h1 { font-size:22px; margin-bottom:4px; }
+  .sub { color:var(--muted); margin-bottom:24px; font-size:13.5px; }
+  .sub code { background:var(--panel2); padding:2px 6px; border-radius:5px; font-size:12px; }
+  .bar { display:flex; gap:10px; flex-wrap:wrap; }
+  input[type=text], input[type=password] { background:var(--panel);
+    border:1px solid var(--border); border-radius:10px; color:var(--text);
+    padding:12px 14px; font-size:14px; outline:none; }
+  #url { flex:1; min-width:280px; }
+  input:focus { border-color:var(--accent2); }
+  button { background:var(--accent); border:0; border-radius:10px; color:#fff;
+    padding:12px 22px; font-size:14px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .opts { display:flex; gap:18px; margin:12px 2px 0; color:var(--muted); font-size:13px;
+          align-items:center; flex-wrap:wrap; }
+  .opts label { display:flex; gap:6px; align-items:center; cursor:pointer; }
+  #apikey { padding:6px 10px; font-size:12px; border-radius:7px; width:190px; }
+  .examples { margin-top:14px; display:flex; gap:8px; flex-wrap:wrap; }
+  .chip { background:var(--panel2); border:1px solid var(--border); color:var(--muted);
+    border-radius:20px; padding:5px 12px; font-size:12px; cursor:pointer; }
+  .chip:hover { color:var(--text); border-color:var(--accent2); }
+  .status { margin-top:20px; font-size:13.5px; color:var(--muted); min-height:20px; }
+  .status.err { color:var(--err); }
+  .status.ok { color:var(--ok); }
+  .tabs { display:flex; gap:4px; margin-top:22px; }
+  .tab { background:none; color:var(--muted); border:1px solid var(--border);
+    border-bottom:0; border-radius:10px 10px 0 0; padding:9px 18px; font-size:13px; }
+  .tab.active { background:var(--panel); color:var(--text); }
+  .panel { background:var(--panel); border:1px solid var(--border);
+    border-radius:0 10px 10px 10px; padding:20px; display:none; }
+  .panel.active { display:block; }
+  pre { white-space:pre-wrap; word-break:break-word; font:12.5px/1.5 ui-monospace,Consolas,monospace;
+        color:#cdd6e4; max-height:560px; overflow:auto; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; }
+  .card { background:var(--panel2); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
+  .card .k { font-size:11px; letter-spacing:.6px; text-transform:uppercase; color:var(--muted); }
+  .card .v { font-size:15px; margin-top:4px; }
+  .section-title { margin:20px 0 10px; font-size:13px; text-transform:uppercase;
+                   letter-spacing:.8px; color:var(--muted); }
+  .tags { display:flex; flex-wrap:wrap; gap:6px; }
+  .tag { background:var(--panel2); border:1px solid var(--border); border-radius:6px;
+         padding:4px 10px; font-size:12.5px; }
+  .tag.na { text-decoration:line-through; opacity:.5; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; }
+  .photos { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px; }
+  .photos img { width:100%; height:130px; object-fit:cover; border-radius:8px;
+                border:1px solid var(--border); }
+  .dl { float:right; background:var(--panel2); color:var(--muted); padding:7px 14px;
+        font-size:12px; font-weight:500; border:1px solid var(--border); }
+  .spin { display:inline-block; width:14px; height:14px; border:2px solid var(--muted);
+    border-top-color:transparent; border-radius:50%; animation:r .7s linear infinite;
+    vertical-align:-2px; margin-right:7px; }
+  @keyframes r { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🏠 Listing Scraper <span style="color:var(--muted);font-weight:400">API tester</span></h1>
+  <div class="sub">
+    Paste an Airbnb or Booking.com property URL → normalized listing JSON, served from this Worker.
+    Developers: <code>GET /api/scrape?url=&lt;encoded URL&gt;</code> · docs at <code>/api/docs</code>
+  </div>
+
+  <div class="bar">
+    <input id="url" type="text" placeholder="https://www.airbnb.com/rooms/… or https://www.booking.com/hotel/…" />
+    <button id="go" onclick="run()">Scrape</button>
+  </div>
+  <div class="opts">
+    <label><input type="checkbox" id="nocache"/> Bypass cache</label>
+    <input id="apikey" type="password" placeholder="X-API-Key (if configured)" />
+    <span title="Workers cannot run headless browsers. Airbnb prices are JS-rendered, so pricing shows a note here — the local Scrapling stealth service covers it.">ⓘ Airbnb pricing: n/a on Worker</span>
+  </div>
+  <div class="examples" id="examples"></div>
+
+  <div class="status" id="status"></div>
+
+  <div class="tabs" id="tabs" style="display:none">
+    <button class="tab active" onclick="show('summary',this)">Summary</button>
+    <button class="tab" onclick="show('json',this)">Raw JSON</button>
+    <button class="tab" onclick="show('photos',this)">Photos</button>
+  </div>
+  <div class="panel active" id="panel-summary"></div>
+  <div class="panel" id="panel-json">
+    <button class="dl" onclick="download()">⬇ download .json</button>
+    <pre id="jsonpre"></pre>
+  </div>
+  <div class="panel" id="panel-photos"><div class="photos" id="photogrid"></div></div>
+</div>
+
+<script>
+const EXAMPLES = [
+  ["Airbnb · Gurugram studio", "https://www.airbnb.co.in/rooms/1719013680427208180?check_in=2026-07-10&check_out=2026-07-12"],
+  ["Airbnb · Noida 2BR", "https://www.airbnb.co.in/rooms/1711065697212792303?check_in=2026-07-10&check_out=2026-07-12"],
+  ["Booking · London apartments", "https://www.booking.com/hotel/gb/queens-park-apartments-by-flying-butler.en-gb.html?checkin=2026-07-13&checkout=2026-07-17&group_adults=2&no_rooms=1"],
+];
+let LAST = null;
+
+document.getElementById('examples').innerHTML =
+  EXAMPLES.map(function(e){ return '<span class="chip" onclick="document.getElementById(\'url\').value=\'' + e[1] + '\'">' + e[0] + '</span>'; }).join('');
+document.getElementById('url').addEventListener('keydown', function(e){ if(e.key==='Enter') run(); });
+
+function esc(s){ return String(s==null?'—':s).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+
+async function run(){
+  const url = document.getElementById('url').value.trim();
+  if(!url) return;
+  const btn = document.getElementById('go'), st = document.getElementById('status');
+  btn.disabled = true;
+  st.className = 'status';
+  st.innerHTML = '<span class="spin"></span>Scraping…';
+  document.getElementById('tabs').style.display = 'none';
+  try{
+    const headers = {'Content-Type':'application/json'};
+    const key = document.getElementById('apikey').value.trim();
+    if(key) headers['X-API-Key'] = key;
+    const r = await fetch('/api/scrape', {method:'POST', headers: headers,
+      body: JSON.stringify({url: url, no_cache: document.getElementById('nocache').checked})});
+    const j = await r.json();
+    if(!j.ok){ st.className='status err'; st.textContent = '✕ ' + j.error + ': ' + j.message + ' (' + (j.elapsed_s||'?') + 's)'; return; }
+    LAST = j.data;
+    st.className='status ok';
+    st.textContent = '✓ ' + j.data.source + ' listing scraped in ' + j.elapsed_s + 's' + (j.cached ? ' (cached)' : '');
+    render(j.data);
+  } catch(e){ st.className='status err'; st.textContent = '✕ ' + e; }
+  finally { btn.disabled = false; }
+}
+
+function show(name, el){
+  document.querySelectorAll('.tab').forEach(function(t){ t.classList.remove('active'); });
+  document.querySelectorAll('.panel').forEach(function(p){ p.classList.remove('active'); });
+  el.classList.add('active');
+  document.getElementById('panel-'+name).classList.add('active');
+}
+
+function card(k,v){ return '<div class="card"><div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + '</div></div>'; }
+
+function render(d){
+  document.getElementById('tabs').style.display = 'flex';
+  document.getElementById('jsonpre').textContent = JSON.stringify(d, null, 2);
+  document.getElementById('photogrid').innerHTML =
+    (d.photos||[]).map(function(p){
+      return '<a href="' + esc(p.url) + '" target="_blank" rel="noopener"><img loading="lazy" src="' + esc(p.url) + '" title="' + esc(p.caption) + '"/></a>';
+    }).join('') || '<span style="color:var(--muted)">No photos extracted</span>';
+
+  const loc = d.location||{}, rev = d.reviews||{}, pr = d.pricing||{}, cap = d.capacity||{};
+  let html = '<div class="grid">'
+    + card('Title', d.title)
+    + card('Source', d.source)
+    + card('Property type', d.property_type)
+    + card('Location', [loc.city, loc.country].filter(Boolean).join(', ') || loc.address)
+    + card('Rating', rev.rating!=null ? rev.rating + (d.source==='booking.com'?' / 10':' / 5') + ' · ' + (rev.count!=null?rev.count:'?') + ' reviews' : null)
+    + card('Host / brand', (d.host||{}).name);
+  if(d.source==='airbnb'){
+    html += card('Capacity', [cap.guests&&cap.guests+' guests', cap.bedrooms&&cap.bedrooms+' BR',
+                              cap.beds&&cap.beds+' beds', cap.bathrooms&&cap.bathrooms+' bath'].filter(Boolean).join(' · '));
+    html += card('Price', pr.display_price || (pr.note ? 'n/a — see stealth service' : null));
+  } else {
+    html += card('Dates', pr.check_in ? pr.check_in + ' → ' + pr.check_out + ' (' + pr.nights + ' nights)' : null);
+    html += card('Cheapest option', pr.cheapest_total_for_stay!=null
+      ? (pr.currency||'') + pr.cheapest_total_for_stay.toLocaleString() + ' total · ' + (pr.currency||'') + (pr.cheapest_per_night||0).toLocaleString() + '/night' : null);
+  }
+  html += '</div>';
+
+  if((d.rooms||[]).length){
+    html += '<div class="section-title">Rooms (' + d.rooms.length + ')</div><table><tr><th>Room</th><th>Beds</th><th>Size</th><th>Options</th></tr>';
+    d.rooms.forEach(function(r){
+      html += '<tr><td>' + esc(r.name) + '</td><td>' + esc(r.beds) + '</td><td>' + esc(r.size) + '</td><td>'
+        + (r.options||[]).map(function(o){ return esc(o.occupancy) + ' → <b>' + esc(o.price) + '</b>'; }).join('<br/>')
+        + '</td></tr>';
+    });
+    html += '</table>';
+  }
+
+  if((d.amenities||[]).length){
+    let n = 0; d.amenities.forEach(function(g){ n += g.items.length; });
+    html += '<div class="section-title">Amenities (' + n + ')</div><div class="tags">';
+    d.amenities.forEach(function(g){ g.items.forEach(function(it){
+      html += '<span class="tag ' + (it.available===false?'na':'') + '" title="' + esc(g.group) + '">' + esc(it.title) + '</span>';
+    }); });
+    html += '</div>';
+  }
+
+  const hr = d.house_rules||{};
+  if(hr.check_in || hr.check_out){
+    html += '<div class="section-title">House rules</div><div class="tags">'
+      + [hr.check_in, hr.check_out, hr.max_guests].concat(hr.other||[]).filter(Boolean)
+        .map(function(x){ return '<span class="tag">' + esc(x) + '</span>'; }).join('') + '</div>';
+  }
+  if(rev.category_ratings){
+    html += '<div class="section-title">Review categories</div><div class="tags">'
+      + Object.keys(rev.category_ratings).map(function(k){
+          return '<span class="tag">' + esc(k) + ': <b>' + esc(rev.category_ratings[k]) + '</b></span>';
+        }).join('') + '</div>';
+  }
+  if(d.description){
+    html += '<div class="section-title">Description</div>'
+      + '<div style="color:var(--muted);font-size:13.5px;white-space:pre-wrap">'
+      + esc(d.description.slice(0,1200)) + (d.description.length>1200?'…':'') + '</div>';
+  }
+  document.getElementById('panel-summary').innerHTML = html;
+}
+
+function download(){
+  if(!LAST) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(LAST,null,2)], {type:'application/json'}));
+  a.download = (LAST.source||'listing') + '_' + (LAST.listing_id||'listing') + '.json';
+  a.click();
+}
+</script>
+</body>
+</html>

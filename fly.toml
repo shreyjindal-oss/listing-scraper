@@ -1,0 +1,19 @@
+# Fly.io config for the Scrapling stealth scraper service.
+# The app name must be globally unique — change it if taken.
+app = "listing-scraper-stealth"
+primary_region = "lhr"   # London; pick a region near your users (e.g. "bom" for Mumbai)
+
+[build]
+# uses the Dockerfile in this folder
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"    # scale to zero when idle (saves money)
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  memory = "2gb"                 # the headless stealth browser needs headroom
+  cpu_kind = "shared"
+  cpus = 2

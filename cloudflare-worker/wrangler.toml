@@ -1,0 +1,15 @@
+name = "listing-scraper-api"
+main = "src/worker.js"
+compatibility_date = "2026-07-01"
+
+# Web UI (test console) served from ./public at the root URL.
+# /api/* has no matching asset, so those requests hit the Worker script.
+[assets]
+directory = "./public"
+
+# Optional: protect the API with a key
+#   wrangler secret put API_KEY
+# then clients must send header:  X-API-Key: <value>
+
+[observability]
+enabled = true

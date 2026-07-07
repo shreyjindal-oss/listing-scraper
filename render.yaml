@@ -1,0 +1,12 @@
+# Render Blueprint — deploys the Scrapling stealth scraper service.
+# In the Render dashboard: New + → Blueprint → connect this repo.
+services:
+  - type: web
+    name: listing-scraper-stealth
+    runtime: docker
+    plan: standard          # 2 GB RAM — required for the headless stealth browser
+    region: frankfurt       # closest to India among Render regions; or "singapore"
+    healthCheckPath: /api/health
+    envVars:
+      - key: API_KEY
+        sync: false         # you'll be prompted to enter the value in the dashboard
