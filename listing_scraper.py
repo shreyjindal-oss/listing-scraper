@@ -589,18 +589,25 @@ class BookingParser:
         agg = ld.get("aggregateRating") or {}
         addr = ld.get("address") or {}
 
+        # city sanity: some page variants put the street in addressLocality
+        city = addr.get("addressLocality")
+        street = addr.get("streetAddress") or ""
+        if (not city or re.match(r"^\d", str(city))) and street.count(",") >= 2:
+            city = [p.strip() for p in street.split(",")][-3]
+
         return {
             "source": "booking.com",
             "url": url.split("?")[0],
             "listing_id": m.group(1) if m else None,
             "scraped_at": datetime.now(timezone.utc).isoformat(),
             "title": ld.get("name") or self._title(page),
-            "property_type": self._property_type(page, html),
-            "description": strip_html(ld.get("description")) or first_text(
-                page, '[data-testid="property-description"], #property_description_content'),
+            "property_type": self._property_type(page, html) or ld.get("@type"),
+            "description": first_text(
+                page, '[data-testid="property-description"], #property_description_content')
+                or strip_html(ld.get("description")),
             "location": {
                 "address": addr.get("streetAddress"),
-                "city": addr.get("addressLocality"),
+                "city": city,
                 "region": addr.get("addressRegion"),
                 "postal_code": addr.get("postalCode"),
                 "country": addr.get("addressCountry"),
@@ -613,7 +620,7 @@ class BookingParser:
             "pricing": self._pricing(page, qs, ld),
             "reviews": self._reviews(page, agg),
             "photos": self._photos(page, html),
-            "house_rules": self._rules(page),
+            "house_rules": self._rules(page, html),
         }
 
     # -- extraction pieces ---------------------------------------------------
@@ -664,11 +671,18 @@ class BookingParser:
         for row in page.css("#hprt-table tbody > tr"):
             name_el = row.css(".hprt-roomtype-icon-link")
             if name_el:
+                # facility spans carry clean English names in data-name-en
+                facs, seen_f = [], set()
+                for f in row.css(".hprt-facilities-facility"):
+                    t = html_lib.unescape(f.attrib.get("data-name-en") or "").strip() or text_of(f)
+                    if t and t not in seen_f:
+                        seen_f.add(t)
+                        facs.append(t)
                 current = {
                     "name": text_of(name_el[0]),
                     "beds": first_text(row, ".hprt-roomtype-bed, [data-testid='room-bed-type']"),
                     "size": None,
-                    "facilities": [text_of(f) for f in row.css(".hprt-facilities-facility")][:12],
+                    "facilities": facs[:40],
                     "options": [],
                 }
                 for f in current["facilities"]:
@@ -682,8 +696,15 @@ class BookingParser:
             price = row.css(".prco-valign-middle-helper, [data-testid='price-and-discounted-price']")
             conditions = [text_of(c) for c in row.css(".hprt-conditions li")][:6]
             if occ or price:
+                occ_text = text_of(occ[0]) if occ else None
+                if not occ_text or not re.search(r"\d", occ_text):
+                    # some variants render occupancy as icons + hidden text only
+                    m2 = re.search(r"Max\.?(?:imum)?\s*(?:number of\s*)?persons?:?\s*\d+",
+                                   text_of(row), re.I)
+                    if m2:
+                        occ_text = m2.group(0)
                 current["options"].append({
-                    "occupancy": text_of(occ[0]) if occ else None,
+                    "occupancy": occ_text,
                     "price": text_of(price[0]) if price else None,
                     "conditions": conditions,
                 })
@@ -708,6 +729,16 @@ class BookingParser:
             if popular:
                 groups.append({"group": "Most popular facilities",
                                "items": [{"title": i, "available": True} for i in popular]})
+        # aggregate every data-name-en amenity on the page (room lightboxes etc.)
+        names, seen_n = [], set()
+        for el in page.css("[data-name-en]"):
+            n = html_lib.unescape(el.attrib.get("data-name-en", "")).strip()
+            if n and n.lower() not in ("privacy", "room size") and n not in seen_n:
+                seen_n.add(n)
+                names.append(n)
+        if names:
+            groups.append({"group": "Room amenities",
+                           "items": [{"title": n, "available": True} for n in names]})
         return groups
 
     def _pricing(self, page, qs, ld) -> dict:
@@ -746,13 +777,15 @@ class BookingParser:
             if m:
                 categories[m.group(1).strip().lower()] = float(m.group(2))
         items = []
-        for card in page.css('[data-testid="featuredreview"], [data-testid="review-card"]')[:20]:
+        for card in page.css('[data-testid="featuredreview"], [data-testid="review-card"], '
+                             '[data-testid="featuredreview-pros-cons"]')[:20]:
             text = first_text(card, '[data-testid="featuredreview-text"], '
                                     '[data-testid="review-positive-text"]')
             author = first_text(card, '.bui-avatar-block__title, '
                                       '[data-testid="review-avatar"] + div')
-            items.append({"author": author,
-                          "text": text or text_of(card)[:300]})
+            body = text or text_of(card)[:300]
+            if body:
+                items.append({"author": author, "text": body})
         rating = agg.get("ratingValue")
         return {"rating": float(rating) if rating is not None else None,
                 "scale": 10,
@@ -760,31 +793,48 @@ class BookingParser:
                 "category_ratings": categories or None,
                 "items": items}
 
+    @staticmethod
+    def _photo_id(u: str) -> str:
+        """Dedupe key: the numeric photo id survives size-variant URL rewrites."""
+        m = re.search(r"/(\d+)\.jpe?g", u)
+        return m.group(1) if m else u
+
     def _photos(self, page, html) -> list:
         urls, seen = [], set()
+
+        def add(u, caption=None):
+            u = u.split("?")[0]
+            pid = self._photo_id(u)
+            if u and pid not in seen:
+                seen.add(pid)
+                urls.append({"url": u, "caption": caption or None})
+
+        # 1) hotelPhotos JS array (raw SSR): large_url: 'https://…', alt: "…"
+        for m in re.finditer(
+                r"large_url:\s*'([^']+)'([\s\S]{0,300}?alt:\s*\"((?:[^\"\\]|\\.)*)\")?", html):
+            cap = m.group(3)
+            add(m.group(1), html_lib.unescape(cap.replace('\\"', '"')) if cap else None)
+        # 2) JSON gallery form: "large_url":"https:\/\/…"
         for m in re.finditer(r'"large_url"\s*:\s*"([^"]+)"', html):
-            u = m.group(1).replace("\\/", "/")
-            if u not in seen:
-                seen.add(u)
-                urls.append({"url": u, "caption": None})
-        if not urls:
-            for img in page.css("img[src*='bstatic.com/xdata/images/hotel']"):
-                src = img.attrib.get("src", "").split("?")[0]
-                base = re.sub(r"/hotel/[^/]+/", "/hotel/max1024x768/", src)
-                if base and base not in seen:
-                    seen.add(base)
-                    urls.append({"url": base, "caption": img.attrib.get("alt") or None})
+            add(m.group(1).replace("\\/", "/"))
+        # 3) fallback: <img> tags, upscaled to a large variant
+        for img in page.css("img[src*='bstatic.com/xdata/images/hotel']"):
+            src = img.attrib.get("src", "").split("?")[0]
+            add(re.sub(r"/hotel/[^/]+/", "/hotel/max1024x768/", src),
+                img.attrib.get("alt"))
         return urls
 
-    def _rules(self, page) -> dict:
+    def _rules(self, page, html) -> dict:
         rules = {"check_in": None, "check_out": None, "other": []}
-        for row in page.css('[data-testid="property-section--content"] > div, '
-                            ".hp-house-rules-table tr"):
-            txt = text_of(row)
-            if re.match(r"Check-in", txt, re.I) and not rules["check_in"]:
-                rules["check_in"] = txt[:120]
-            elif re.match(r"Check-?out", txt, re.I) and not rules["check_out"]:
-                rules["check_out"] = txt[:120]
+        text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
+        time_pat = (r"((?:From|Until|Before|Between)?\s*\d{1,2}:\d{2}"
+                    r"(?:\s*(?:-|–|to|until)\s*\d{1,2}:\d{2})?)")
+        m = re.search(r"Check-?in\s*(?:hours?)?\s*" + time_pat, text, re.I)
+        if m:
+            rules["check_in"] = m.group(1).strip()
+        m = re.search(r"Check-?out\s*(?:hours?)?\s*" + time_pat, text, re.I)
+        if m:
+            rules["check_out"] = m.group(1).strip()
         return rules
 
 
