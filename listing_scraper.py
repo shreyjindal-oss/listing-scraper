@@ -795,15 +795,17 @@ class BookingParser:
 
     @staticmethod
     def _photo_id(u: str) -> str:
-        """Dedupe key: the numeric photo id survives size-variant URL rewrites."""
-        m = re.search(r"/(\d+)\.jpe?g", u)
-        return m.group(1) if m else u
+        """Dedupe key: the numeric photo id survives size/format URL variants."""
+        m = re.search(r"/(\d+)\.(?:jpe?g|webp|png|avif)", u)
+        return m.group(1) if m else u.split("?")[0]
 
     def _photos(self, page, html) -> list:
         urls, seen = [], set()
 
         def add(u, caption=None):
-            u = u.split("?")[0]
+            # keep the query string — bstatic URLs carry a ?k= signature token
+            # and return 401 without it
+            u = (u or "").strip()
             pid = self._photo_id(u)
             if u and pid not in seen:
                 seen.add(pid)
@@ -817,11 +819,10 @@ class BookingParser:
         # 2) JSON gallery form: "large_url":"https:\/\/…"
         for m in re.finditer(r'"large_url"\s*:\s*"([^"]+)"', html):
             add(m.group(1).replace("\\/", "/"))
-        # 3) fallback: <img> tags, upscaled to a large variant
+        # 3) fallback: <img> tags, kept exactly as served (rewriting the size
+        #    variant would invalidate the ?k= signature)
         for img in page.css("img[src*='bstatic.com/xdata/images/hotel']"):
-            src = img.attrib.get("src", "").split("?")[0]
-            add(re.sub(r"/hotel/[^/]+/", "/hotel/max1024x768/", src),
-                img.attrib.get("alt"))
+            add(img.attrib.get("src", ""), img.attrib.get("alt"))
         return urls
 
     def _rules(self, page, html) -> dict:
