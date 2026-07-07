@@ -59,7 +59,12 @@ Invoke-RestMethod -Uri http://localhost:8000/api/scrape -Method Post `
   ConvertTo-Json -Depth 10
 ```
 
-## Docker (for cloud deployment later)
+## Deploying on Google Cloud Run
+
+See **[DEPLOY_GCP.md](DEPLOY_GCP.md)** — one-command deploy for developers
+(`gcloud run deploy --source .`), plus optional CI via `cloudbuild.yaml`.
+
+## Docker (for other hosts)
 
 ```powershell
 docker build -t listing-scraper .

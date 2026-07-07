@@ -1,0 +1,11 @@
+# Keep the Cloud Build upload small — only the service needs to ship.
+.git/
+.venv/
+__pycache__/
+.scraper_cache/
+.browser_installed
+cloudflare-worker/
+fly.toml
+render.yaml
+run.ps1
+*.md

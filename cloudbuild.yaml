@@ -1,0 +1,51 @@
+# Cloud Build pipeline: build the Docker image, push to Artifact Registry,
+# deploy to Cloud Run. Used by the CI trigger described in DEPLOY_GCP.md.
+#
+# Substitutions you can override on the trigger:
+#   _REGION   deploy region            (default asia-south1 / Mumbai)
+#   _SERVICE  Cloud Run service name   (default listing-scraper-stealth)
+#   _REPO     Artifact Registry repo   (default listing-scraper)
+
+substitutions:
+  _REGION: asia-south1
+  _SERVICE: listing-scraper-stealth
+  _REPO: listing-scraper
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+      - --region=${_REGION}
+      - --memory=2Gi
+      - --cpu=2
+      - --timeout=120
+      - --concurrency=4
+      - --min-instances=0
+      - --max-instances=3
+      - --allow-unauthenticated
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+
+options:
+  machineType: E2_HIGHCPU_8   # the base image is large; speeds up builds
+  logging: CLOUD_LOGGING_ONLY
