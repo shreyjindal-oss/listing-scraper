@@ -697,10 +697,16 @@ class BookingParser:
         for row in page.css("#hprt-table tbody > tr"):
             name_el = row.css(".hprt-roomtype-icon-link")
             if name_el:
-                # facility spans carry clean English names in data-name-en
+                # facility spans carry clean English names in data-name-en;
+                # meta-badges ("privacy" → Entire apartment, "room size" → 46 m²)
+                # carry generic keys, so their visible text is the real value
                 facs, seen_f = [], set()
                 for f in row.css(".hprt-facilities-facility"):
-                    t = html_lib.unescape(f.attrib.get("data-name-en") or "").strip() or text_of(f)
+                    attr = html_lib.unescape(f.attrib.get("data-name-en") or "").strip()
+                    if not attr or attr.lower() in ("privacy", "room size"):
+                        t = text_of(f)
+                    else:
+                        t = attr
                     if t and t not in seen_f:
                         seen_f.add(t)
                         facs.append(t)
@@ -729,6 +735,11 @@ class BookingParser:
                                    text_of(row), re.I)
                     if m2:
                         occ_text = m2.group(0)
+                    else:
+                        # last resort: one person-icon per guest
+                        icons = row.css(".bicon-occupancy")
+                        if icons:
+                            occ_text = f"Max persons: {len(icons)}"
                 current["options"].append({
                     "occupancy": occ_text,
                     "price": text_of(price[0]) if price else None,
@@ -909,18 +920,41 @@ def scrape(url: str, use_cache: bool = True, stealth: bool = False,
                                "(likely a bot interstitial page)")
         return data
 
+    used_stealth = stealth
     try:
-        return attempt(stealth, use_cache)
+        data = attempt(stealth, use_cache)
     except ScraperError as e:
         if stealth or e.code == "UNSUPPORTED_URL":
             raise
         # automatic retry with the stealth browser on a fresh fetch
         try:
-            return attempt(True, False)
+            data = attempt(True, False)
+            used_stealth = True
         except ScraperError as e2:
             raise ScraperError(
                 e2.code, f"{e2} — retried with stealth browser and still failed; "
                          f"try again in a minute or set SCRAPER_PROXY") from e2
+
+    # Booking A/B-serves page variants; some carry only a handful of amenity
+    # badges. If the amenity yield looks thin, try the other fetch mode once
+    # and keep whichever amenity set is richer.
+    if platform == "booking" and len(data.get("amenities_flat") or []) < 8:
+        try:
+            alt = attempt(not used_stealth, False)
+            if len(alt.get("amenities_flat") or []) > len(data.get("amenities_flat") or []):
+                data["amenities"] = alt["amenities"]
+                data["amenities_flat"] = alt["amenities_flat"]
+                # room facilities usually come from the same variant — take the
+                # richer set there too when room names line up
+                alt_rooms = {r["name"]: r for r in alt.get("rooms") or []}
+                for room in data.get("rooms") or []:
+                    twin = alt_rooms.get(room["name"])
+                    if twin and len(twin.get("facilities") or []) > len(room.get("facilities") or []):
+                        room["facilities"] = twin["facilities"]
+                        room["size"] = room.get("size") or twin.get("size")
+        except ScraperError:
+            pass  # enrichment is best-effort
+    return data
 
 
 def main() -> int:
