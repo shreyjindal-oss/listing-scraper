@@ -69,11 +69,17 @@ Workers can't run headless browsers, so this is the **fast-path parser**
 
 | Capability | Worker API | Python + Scrapling (parent folder) |
 |---|---|---|
-| Airbnb full listing data | ✅ | ✅ |
+| Airbnb full listing data (incl. `amenities_flat`) | ✅ | ✅ |
 | Airbnb **live pricing** | ❌ (JS-rendered) | ✅ with `--stealth` |
 | Booking.com data + room prices | ✅ *if not blocked* | ✅ |
 | Anti-bot bypass / stealth browser | ❌ | ✅ |
+| Hollow-result retry + thin-amenity enrichment | ❌ (single fetch) | ✅ |
 | Zero-maintenance serverless deploy | ✅ | ❌ (needs a host) |
+
+The Worker mirrors the same JSON schema (including `amenities_flat`, the merged
+deduped amenity list). It does one direct fetch per request — the retry and
+amenity-enrichment logic live in the Python service, so route Booking.com
+through the stealth fallback below for best coverage.
 
 Cloudflare egress IPs are datacenter IPs — **Booking.com blocks them**
 (you'll get a structured `"error": "BLOCKED"` response, not a crash).
