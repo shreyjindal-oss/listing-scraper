@@ -1,15 +1,24 @@
 name = "listing-scraper-api"
 main = "src/worker.js"
-compatibility_date = "2026-07-01"
+compatibility_date = "2026-03-24"   # >= 2026-03-24 required for Browser Rendering quickAction
 
 # Web UI (test console) served from ./public at the root URL.
 # /api/* has no matching asset, so those requests hit the Worker script.
 [assets]
 directory = "./public"
 
+# Stealth mode: managed Chromium that renders JS and gets past bot walls.
+# Enables ?stealth=1 and auto-escalation of blocked direct fetches.
+[browser]
+binding = "BROWSER"
+
 # Optional: protect the API with a key
 #   wrangler secret put API_KEY
 # then clients must send header:  X-API-Key: <value>
+
+# Optional: external Python/Scrapling fallback (alternative to [browser])
+#   wrangler secret put FALLBACK_URL
+#   wrangler secret put FALLBACK_KEY
 
 [observability]
 enabled = true

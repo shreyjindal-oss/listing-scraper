@@ -81,9 +81,9 @@
     <button id="go" onclick="run()">Scrape</button>
   </div>
   <div class="opts">
+    <label><input type="checkbox" id="stealth"/> Stealth mode (Browser Rendering — JS pages, anti-bot; slower)</label>
     <label><input type="checkbox" id="nocache"/> Bypass cache</label>
     <input id="apikey" type="password" placeholder="X-API-Key (if configured)" />
-    <span title="Workers cannot run headless browsers. Airbnb prices are JS-rendered, so pricing shows a note here — the local Scrapling stealth service covers it.">ⓘ Airbnb pricing: n/a on Worker</span>
   </div>
   <div class="examples" id="examples"></div>
 
@@ -120,21 +120,23 @@ async function run(){
   const url = document.getElementById('url').value.trim();
   if(!url) return;
   const btn = document.getElementById('go'), st = document.getElementById('status');
+  const stealth = document.getElementById('stealth').checked;
   btn.disabled = true;
   st.className = 'status';
-  st.innerHTML = '<span class="spin"></span>Scraping…';
+  st.innerHTML = '<span class="spin"></span>Scraping' + (stealth ? ' with Browser Rendering (can take 15–40 s)' : '') + '…';
   document.getElementById('tabs').style.display = 'none';
   try{
     const headers = {'Content-Type':'application/json'};
     const key = document.getElementById('apikey').value.trim();
     if(key) headers['X-API-Key'] = key;
     const r = await fetch('/api/scrape', {method:'POST', headers: headers,
-      body: JSON.stringify({url: url, no_cache: document.getElementById('nocache').checked})});
+      body: JSON.stringify({url: url, stealth: stealth, no_cache: document.getElementById('nocache').checked})});
     const j = await r.json();
     if(!j.ok){ st.className='status err'; st.textContent = '✕ ' + j.error + ': ' + j.message + ' (' + (j.elapsed_s||'?') + 's)'; return; }
     LAST = j.data;
     st.className='status ok';
-    st.textContent = '✓ ' + j.data.source + ' listing scraped in ' + j.elapsed_s + 's' + (j.cached ? ' (cached)' : '');
+    st.textContent = '✓ ' + j.data.source + ' listing scraped in ' + j.elapsed_s + 's'
+      + (j.via ? ' · ' + j.via : '') + (j.cached ? ' (cached)' : '');
     render(j.data);
   } catch(e){ st.className='status err'; st.textContent = '✕ ' + e; }
   finally { btn.disabled = false; }

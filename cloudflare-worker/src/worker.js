@@ -480,19 +480,83 @@ export function detectPlatform(target) {
   throw new ScraperError("UNSUPPORTED_URL", `Not an Airbnb or Booking.com URL: ${host}`);
 }
 
+function looksBlocked(html, status) {
+  if ([403, 429, 503].includes(status)) return true;
+  const len = (html || "").length;
+  if (len < 5000) return true;                       // stub / challenge page
+  // Genuine bot-challenge/interstitial pages are small. Real listing pages are
+  // large (Booking ~1.5 MB, Airbnb hundreds of KB) and legitimately reference
+  // words like "captcha" (reCAPTCHA login libs), so only apply the marker test
+  // on smallish pages to avoid false-positives on real rendered content.
+  if (len < 150000) {
+    const low = html.slice(0, 20000).toLowerCase();
+    return BLOCK_MARKERS.some((m) => low.includes(m));
+  }
+  return false;
+}
+
+/** No meaningful listing data — the tell-tale of an interstitial/challenge. */
+function isHollow(d) {
+  return !(d && (d.title || (d.photos && d.photos.length) ||
+                 (d.rooms && d.rooms.length) || d.description));
+}
+
 async function fetchPage(target) {
   const resp = await fetch(target, { headers: BROWSER_HEADERS, redirect: "follow" });
   const html = await resp.text();
-  if ([403, 429, 503].includes(resp.status))
-    throw new ScraperError("BLOCKED", `HTTP ${resp.status} — the site is blocking datacenter IPs. ` +
-      "Use the Python/Scrapling stealth service for this URL.");
-  if (resp.status >= 400)
+  if (resp.status >= 400 && ![403, 429, 503].includes(resp.status))
     throw new ScraperError("HTTP_ERROR", `HTTP ${resp.status} for ${target}`);
-  const low = html.slice(0, 20000).toLowerCase();
-  if (html.length < 5000 || BLOCK_MARKERS.some((m) => low.includes(m)))
-    throw new ScraperError("BLOCKED", "Response looks like a bot challenge page. " +
-      "Use the Python/Scrapling stealth service for this URL.");
+  if (looksBlocked(html, resp.status))
+    throw new ScraperError("BLOCKED", "Response looks like a bot challenge page.");
   return html;
+}
+
+/**
+ * Stealth path: render the page with Cloudflare Browser Rendering (managed
+ * Chromium that executes JS). Requires a [browser] binding in wrangler.toml.
+ * Returns fully-rendered HTML that the same parsers consume.
+ */
+async function renderStealth(env, target) {
+  if (!env.BROWSER)
+    throw new ScraperError("STEALTH_UNAVAILABLE",
+      "Browser Rendering is not configured. Add a [browser] binding and redeploy.");
+
+  // Booking.com never reaches network-idle (constant analytics/websocket
+  // traffic) and sometimes client-side reloads to set currency/session, which
+  // destroys the render context under `networkidle2`. `domcontentloaded` is
+  // robust and the parsers only need server-rendered content anyway. We retry
+  // once with `load` if the first attempt yields nothing usable.
+  const waits = ["domcontentloaded", "load"];
+  let lastErr = null;
+  for (const waitUntil of waits) {
+    let resp;
+    try {
+      resp = await env.BROWSER.quickAction("content", {
+        url: target,
+        gotoOptions: { waitUntil, timeout: 30000 },
+      });
+    } catch (e) {
+      lastErr = e;
+      continue;
+    }
+    if (!resp.ok) {
+      lastErr = new ScraperError("BLOCKED",
+        `Browser Rendering failed (${resp.status}): ${(await resp.text()).slice(0, 200)}`);
+      continue;
+    }
+    const data = await resp.json();
+    const html = data && data.result;
+    // accept any non-trivial HTML; the parser/isHollow check downstream is the
+    // real content judge (avoids false-positives on large real pages)
+    if (data.success && typeof html === "string" && html.length >= 2000)
+      return html;
+    lastErr = new ScraperError("BLOCKED", "Browser Rendering returned no usable content.");
+  }
+  throw lastErr || new ScraperError("BLOCKED", "Browser Rendering failed.");
+}
+
+function parseFor(platform, html, target) {
+  return platform === "airbnb" ? parseAirbnb(html, target) : parseBooking(html, target);
 }
 
 async function handleScrape(request, env, ctx) {
@@ -500,16 +564,17 @@ async function handleScrape(request, env, ctx) {
   if (env.API_KEY && request.headers.get("X-API-Key") !== env.API_KEY)
     return json({ ok: false, error: "UNAUTHORIZED", message: "Missing or invalid X-API-Key header" }, 401);
 
-  let target, noCache = false;
+  let target, noCache = false, stealth = false;
   if (request.method === "POST") {
     let body;
     try { body = await request.json(); }
     catch { return json({ ok: false, error: "BAD_REQUEST", message: "Body must be JSON: {\"url\": \"...\"}" }, 400); }
-    target = body.url; noCache = !!body.no_cache;
+    target = body.url; noCache = !!body.no_cache; stealth = !!body.stealth;
   } else {
     const u = new URL(request.url);
     target = u.searchParams.get("url");
     noCache = u.searchParams.get("no_cache") === "1";
+    stealth = u.searchParams.get("stealth") === "1";
   }
   if (!target) return json({ ok: false, error: "BAD_REQUEST", message: "Provide ?url=… or POST {\"url\": \"…\"}" }, 400);
   target = target.trim();
@@ -518,10 +583,10 @@ async function handleScrape(request, env, ctx) {
   try {
     const platform = detectPlatform(target);
 
-    // edge cache
+    // edge cache (stealth results cached separately)
     const cache = caches.default;
     const cacheKey = new Request("https://cache.listing-scraper/" +
-      encodeURIComponent(target), { method: "GET" });
+      (stealth ? "s/" : "") + encodeURIComponent(target), { method: "GET" });
     if (!noCache) {
       const hit = await cache.match(cacheKey);
       if (hit) {
@@ -530,19 +595,47 @@ async function handleScrape(request, env, ctx) {
       }
     }
 
-    const html = await fetchPage(target);
-    const data = platform === "airbnb" ? parseAirbnb(html, target) : parseBooking(html, target);
+    let html, via, data;
+    if (stealth) {
+      html = await renderStealth(env, target);        // explicit stealth request
+      via = "browser-rendering";
+      data = parseFor(platform, html, target);
+    } else {
+      try {
+        html = await fetchPage(target);               // fast path
+        data = parseFor(platform, html, target);
+        if (isHollow(data)) throw new ScraperError("BLOCKED", "Direct fetch returned no listing data.");
+        via = "direct-fetch";
+      } catch (e) {
+        // auto-escalate a blocked / empty / unparseable direct fetch to
+        // Browser Rendering, if the binding is available
+        if (["BLOCKED", "PARSE_FAILED"].includes(e.code) && env.BROWSER) {
+          html = await renderStealth(env, target);
+          data = parseFor(platform, html, target);
+          via = "browser-rendering";
+        } else {
+          throw e;
+        }
+      }
+    }
+
+    // The parser is the final judge: a challenge page that slips past the
+    // heuristics yields nothing useful.
+    if (isHollow(data))
+      throw new ScraperError("EMPTY_RESULT",
+        "Page rendered but contained no listing data (possible bot challenge — retry, or use a proxy).");
 
     ctx.waitUntil(cache.put(cacheKey, new Response(JSON.stringify(data), {
       headers: { "Content-Type": "application/json", "Cache-Control": `s-maxage=${CACHE_TTL}` } })));
 
-    return json({ ok: true, cached: false, elapsed_s: (Date.now() - started) / 1000, data });
+    return json({ ok: true, cached: false, via, elapsed_s: (Date.now() - started) / 1000, data });
   } catch (e) {
     const code = e instanceof ScraperError ? e.code : "INTERNAL";
 
-    // Optional stealth fallback: if a FALLBACK_URL env/secret points at the
-    // Python/Scrapling service (same /api/scrape contract), forward blocked
-    // requests there instead of failing.
+    // Optional external stealth fallback: if a FALLBACK_URL env/secret points
+    // at the Python/Scrapling service (same /api/scrape contract), forward
+    // blocked requests there. Use this when you'd rather not enable Browser
+    // Rendering, or want the Python service's extra retry/enrichment.
     if (code === "BLOCKED" && env.FALLBACK_URL) {
       try {
         const fr = await fetch(env.FALLBACK_URL.replace(/\/+$/, "") + "/api/scrape", {
@@ -560,7 +653,8 @@ async function handleScrape(request, env, ctx) {
     }
 
     const status = code === "UNSUPPORTED_URL" || code === "BAD_REQUEST" ? 400
-      : code === "BLOCKED" ? 502 : code === "INTERNAL" ? 500 : 422;
+      : code === "BLOCKED" ? 502 : code === "STEALTH_UNAVAILABLE" ? 501
+      : code === "EMPTY_RESULT" ? 502 : code === "INTERNAL" ? 500 : 422;
     return json({ ok: false, error: code, message: e.message, url: target,
       elapsed_s: (Date.now() - started) / 1000 }, status);
   }
@@ -569,15 +663,16 @@ async function handleScrape(request, env, ctx) {
 const USAGE = {
   service: "listing-scraper-api",
   usage: {
-    "GET /api/scrape?url=<encoded listing url>": "scrape a listing (add &no_cache=1 to bypass cache)",
-    "POST /api/scrape": '{"url": "https://…", "no_cache": false}',
+    "GET /api/scrape?url=<encoded listing url>": "scrape a listing (&no_cache=1 to bypass cache, &stealth=1 to force Browser Rendering)",
+    "POST /api/scrape": '{"url": "https://…", "no_cache": false, "stealth": false}',
     "GET /api/health": "health check",
   },
   auth: "if the worker has an API_KEY secret set, send it as an X-API-Key header",
   supported: ["airbnb.*/rooms/<id>", "booking.com/hotel/…"],
   notes: [
-    "Airbnb pricing is JS-rendered and not available via direct fetch — use the Scrapling stealth service for that field.",
-    "Responses are edge-cached for 1 hour; pass no_cache to force a refresh.",
+    "Stealth mode renders the page with Cloudflare Browser Rendering (managed Chromium). It captures JS-rendered data (e.g. Airbnb pricing) and gets past bot walls that block a plain fetch. Requires a [browser] binding.",
+    "A blocked direct fetch auto-escalates to Browser Rendering when the binding is present; the response 'via' field reports which path was used (direct-fetch | browser-rendering | stealth-fallback).",
+    "Responses are edge-cached for 1 hour (stealth cached separately); pass no_cache to force a refresh.",
   ],
 };
 
