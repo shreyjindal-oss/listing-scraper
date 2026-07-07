@@ -91,6 +91,12 @@ class PageFetcher:
             with open(p, "w", encoding="utf-8") as f:
                 f.write(text)
 
+    def invalidate(self, url: str, stealth: bool = False) -> None:
+        """Drop a cached page (e.g. when it parsed to nothing)."""
+        p = self._cache_path(url + ("#stealth" if stealth else ""))
+        if p and os.path.exists(p):
+            os.remove(p)
+
     def _throttle(self) -> None:
         elapsed = time.time() - self._last_request_ts
         if elapsed < self.min_interval:
@@ -209,6 +215,21 @@ def strip_html(s: Optional[str]) -> Optional[str]:
     return re.sub(r"<[^>]+>", "", html_lib.unescape(s)).strip()
 
 
+def flatten_amenities(groups: list) -> list:
+    """Single deduped list of available amenity titles across all groups —
+    handy for mapping into an external amenity taxonomy."""
+    flat, seen = [], set()
+    for g in groups or []:
+        for item in g.get("items", []):
+            if item.get("available") is False:
+                continue
+            t = (item.get("title") or "").strip()
+            if t and t.lower() not in seen:
+                seen.add(t.lower())
+                flat.append(t)
+    return flat
+
+
 def text_of(el) -> str:
     """innerText-ish: join all descendant text nodes of a Scrapling element."""
     if el is None:
@@ -259,6 +280,7 @@ class AirbnbParser:
         qs = parse_qs(urlparse(url).query)
 
         listing_id = re.search(r"/rooms/(\d+)", url)
+        amenities = self._amenities(root)
 
         return {
             "source": "airbnb",
@@ -272,7 +294,8 @@ class AirbnbParser:
             "host": self._host(sections, root),
             "capacity": self._capacity(root, page),
             "sleeping_arrangement": self._sleeping(root),
-            "amenities": self._amenities(root),
+            "amenities": amenities,
+            "amenities_flat": flatten_amenities(amenities),
             "pricing": self._pricing(root, page, qs),
             "reviews": self._reviews(root, ld),
             "photos": self._photos(root),
@@ -595,6 +618,8 @@ class BookingParser:
         if (not city or re.match(r"^\d", str(city))) and street.count(",") >= 2:
             city = [p.strip() for p in street.split(",")][-3]
 
+        amenities = self._facilities(page)
+
         return {
             "source": "booking.com",
             "url": url.split("?")[0],
@@ -616,7 +641,8 @@ class BookingParser:
             "host": {"name": self._brand(page), "type": "property_manager_or_hotel"},
             "capacity": None,  # per-room on Booking; see rooms[]
             "rooms": self._rooms(page),
-            "amenities": self._facilities(page),
+            "amenities": amenities,
+            "amenities_flat": flatten_amenities(amenities),
             "pricing": self._pricing(page, qs, ld),
             "reviews": self._reviews(page, agg),
             "photos": self._photos(page, html),
@@ -852,6 +878,13 @@ def detect_platform(url: str) -> str:
     raise ScraperError("UNSUPPORTED_URL", f"Not an Airbnb or Booking.com URL: {host}")
 
 
+def _is_hollow(data: dict) -> bool:
+    """True when a parse produced no meaningful listing data — the tell-tale of
+    a bot interstitial that slipped past block detection."""
+    return not (data.get("title") or data.get("photos") or data.get("rooms")
+                or data.get("description"))
+
+
 def scrape(url: str, use_cache: bool = True, stealth: bool = False,
            cache_dir: Optional[str] = None) -> dict:
     platform = detect_platform(url)
@@ -860,9 +893,34 @@ def scrape(url: str, use_cache: bool = True, stealth: bool = False,
         else os.environ.get("SCRAPER_CACHE_DIR", ".scraper_cache"),
         cache_ttl=int(os.environ.get("SCRAPER_CACHE_TTL", "3600")),
     )
-    html = fetcher.get(url, use_cache=use_cache, stealth=stealth)
     parser = AirbnbParser() if platform == "airbnb" else BookingParser()
-    return parser.parse(html, url)
+
+    def attempt(use_stealth: bool, allow_cache: bool) -> dict:
+        html = fetcher.get(url, use_cache=allow_cache, stealth=use_stealth)
+        try:
+            data = parser.parse(html, url)
+        except ScraperError:
+            fetcher.invalidate(url, stealth=use_stealth)  # never keep junk pages
+            raise
+        if _is_hollow(data):
+            fetcher.invalidate(url, stealth=use_stealth)
+            raise ScraperError("EMPTY_RESULT",
+                               "Fetched page contained no listing data "
+                               "(likely a bot interstitial page)")
+        return data
+
+    try:
+        return attempt(stealth, use_cache)
+    except ScraperError as e:
+        if stealth or e.code == "UNSUPPORTED_URL":
+            raise
+        # automatic retry with the stealth browser on a fresh fetch
+        try:
+            return attempt(True, False)
+        except ScraperError as e2:
+            raise ScraperError(
+                e2.code, f"{e2} — retried with stealth browser and still failed; "
+                         f"try again in a minute or set SCRAPER_PROXY") from e2
 
 
 def main() -> int:
