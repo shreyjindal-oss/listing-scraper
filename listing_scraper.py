@@ -938,7 +938,12 @@ def scrape(url: str, use_cache: bool = True, stealth: bool = False,
     # Booking A/B-serves page variants; some carry only a handful of amenity
     # badges. If the amenity yield looks thin, try the other fetch mode once
     # and keep whichever amenity set is richer.
-    if platform == "booking" and len(data.get("amenities_flat") or []) < 8:
+    #
+    # Skip this when the result already came from the stealth browser: that
+    # path is slow (~30 s) and usually already returns the rich variant, so a
+    # second stealth render rarely helps and would roughly double latency.
+    if (platform == "booking" and not used_stealth
+            and len(data.get("amenities_flat") or []) < 8):
         try:
             alt = attempt(not used_stealth, False)
             if len(alt.get("amenities_flat") or []) > len(data.get("amenities_flat") or []):
