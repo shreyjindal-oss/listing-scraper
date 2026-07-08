@@ -13,7 +13,8 @@ servers to manage.
 
 ## One-command deploy (recommended)
 
-From the repo root (where the `Dockerfile` is):
+From the repo root (where the `Dockerfile` is — it `COPY`s in the Python
+source from `service/`):
 
 ```bash
 gcloud config set project YOUR_PROJECT_ID
@@ -81,6 +82,31 @@ wrangler secret put FALLBACK_URL   # the Cloud Run service URL
 wrangler secret put FALLBACK_KEY   # the API key
 wrangler deploy
 ```
+
+## Failure alert emails (optional)
+
+The service emails you via SendGrid whenever a scrape hits a real fault —
+blocked by anti-bot protection, fetch/parse failure (often a site markup
+change), an unhandled internal error, or a page that parsed but came back
+thin (missing photos/rooms/amenities). Caller mistakes (bad URLs) never alert.
+
+```bash
+echo -n "YOUR_SENDGRID_API_KEY" | gcloud secrets create sendgrid-api-key --data-file=-
+
+gcloud run services update listing-scraper-stealth \
+  --region asia-south1 \
+  --set-secrets SENDGRID_API_KEY=sendgrid-api-key:latest \
+  --set-env-vars ALERT_EMAIL_TO=shrey.jindal@thesqua.re,ALERT_EMAIL_FROM=noreply@thesqua.re
+```
+
+Notes:
+- `ALERT_EMAIL_FROM` must be a sender verified in your SendGrid account
+  (Settings → Sender Authentication), or SendGrid will reject the send.
+- Repeat alerts of the same kind are throttled to one per `ALERT_COOLDOWN_S`
+  (default 900s/15min) per instance, so a persistent break doesn't flood your
+  inbox on every request.
+- If `SENDGRID_API_KEY` isn't set, alerting silently no-ops (logged once per
+  attempt) — the service still works normally, you just won't get emails.
 
 ## Continuous deployment (optional)
 

@@ -241,6 +241,8 @@ def main():
     # URL detection
     ok &= check("detect airbnb", ls.detect_platform("https://www.airbnb.co.in/rooms/1") == "airbnb")
     ok &= check("detect booking", ls.detect_platform("https://www.booking.com/hotel/gb/x.html") == "booking")
+    ok &= check("detect booking no scheme",
+                ls.detect_platform("www.booking.com/hotel/gb/x.html") == "booking")
     try:
         ls.detect_platform("https://example.com")
         ok &= check("detect unsupported", False)

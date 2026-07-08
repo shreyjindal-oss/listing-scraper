@@ -8,7 +8,11 @@ WORKDIR /srv
 COPY requirements.txt .
 RUN uv pip install --python /app/.venv/bin/python3 fastapi uvicorn pydantic
 
-COPY listing_scraper.py app.py ./
+# Copy the whole service/ directory (flattened into WORKDIR) instead of
+# naming its files individually — a hand-maintained list silently drops new
+# modules (this already broke a deploy once when alerts.py wasn't listed
+# here). Anything new added under service/ just ships automatically.
+COPY service/ ./
 
 EXPOSE 8080
 # Base image sets its own ENTRYPOINT (a `scrapling` CLI wrapper); override it

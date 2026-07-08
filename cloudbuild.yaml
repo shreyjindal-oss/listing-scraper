@@ -62,7 +62,11 @@ steps:
       # requires: echo -n "KEY" | gcloud secrets create scraper-api-key --data-file=-
       # (see DEPLOY_GCP.md "Better secret handling") — remove this line if you
       # don't want to gate the API with a key.
-      - --set-secrets=API_KEY=scraper-api-key:latest
+      # SENDGRID_API_KEY requires: echo -n "KEY" | gcloud secrets create sendgrid-api-key --data-file=-
+      # (see DEPLOY_GCP.md "Failure alert emails") — remove it and the
+      # ALERT_EMAIL_TO/FROM env vars below if you don't want alert emails.
+      - --set-secrets=API_KEY=scraper-api-key:latest,SENDGRID_API_KEY=sendgrid-api-key:latest
+      - --set-env-vars=ALERT_EMAIL_TO=shrey.jindal@thesqua.re,ALERT_EMAIL_FROM=noreply@thesqua.re
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$BUILD_ID

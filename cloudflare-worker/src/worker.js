@@ -471,9 +471,16 @@ export function parseBooking(html, url) {
 // fetching & routing
 // --------------------------------------------------------------------------
 
+// A scheme-less paste like "booking.com/hotel/..." is unambiguous — assume
+// https rather than rejecting it outright (new URL() throws without one).
+export function ensureScheme(target) {
+  try { new URL(target); return target; }
+  catch { return "https://" + target; }
+}
+
 export function detectPlatform(target) {
   let host;
-  try { host = new URL(target).hostname.toLowerCase(); }
+  try { host = new URL(ensureScheme(target)).hostname.toLowerCase(); }
   catch { throw new ScraperError("UNSUPPORTED_URL", `Not a valid URL: ${target}`); }
   if (host.includes("airbnb.")) return "airbnb";
   if (host.includes("booking.com")) return "booking";
@@ -577,7 +584,7 @@ async function handleScrape(request, env, ctx) {
     stealth = u.searchParams.get("stealth") === "1";
   }
   if (!target) return json({ ok: false, error: "BAD_REQUEST", message: "Provide ?url=… or POST {\"url\": \"…\"}" }, 400);
-  target = target.trim();
+  target = ensureScheme(target.trim());
 
   const started = Date.now();
   try {

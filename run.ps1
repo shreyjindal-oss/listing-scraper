@@ -29,9 +29,10 @@ if (-not (Test-Path ".browser_installed")) {
     New-Item -ItemType File ".browser_installed" | Out-Null
 }
 
-# 4. Run
+# 4. Run (app code lives in service/)
 Write-Host ""
 Write-Host "  Server starting -> http://localhost:8000" -ForegroundColor Green
 Write-Host "  Press Ctrl+C to stop." -ForegroundColor DarkGray
 Write-Host ""
+Set-Location service
 uvicorn app:app --port 8000

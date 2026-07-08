@@ -10,3 +10,9 @@ services:
     envVars:
       - key: API_KEY
         sync: false         # you'll be prompted to enter the value in the dashboard
+      - key: SENDGRID_API_KEY
+        sync: false         # optional — enables failure alert emails, see DEPLOY_GCP.md
+      - key: ALERT_EMAIL_TO
+        value: shrey.jindal@thesqua.re
+      - key: ALERT_EMAIL_FROM
+        value: noreply@thesqua.re

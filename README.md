@@ -24,6 +24,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 scrapling install
+cd service
 uvicorn app:app --port 8000
 ```
 
@@ -81,16 +82,23 @@ Fly.io / Railway / Render / a VPS for a shareable URL.
 
 ## Files
 
+The Python source lives under `service/`; deployment tooling (Dockerfile,
+requirements.txt, per-platform configs) stays at the repo root. The
+Dockerfile does `COPY service/ ./` rather than naming files individually, so
+a new module under `service/` always ships — no allowlist to keep in sync.
+
 | File | Purpose |
 |---|---|
-| `listing_scraper.py` | Core scraper: fetch (Scrapling) + parsers + CLI |
-| `app.py` | FastAPI server + test UI |
-| `test_listing_scraper.py` | offline parser tests — run after cloning to verify setup (`python test_listing_scraper.py` → `ALL TESTS PASSED`) |
+| `service/listing_scraper.py` | Core scraper: fetch (Scrapling) + parsers + CLI |
+| `service/app.py` | FastAPI server + test UI |
+| `service/alerts.py` | SendGrid failure-alert emails |
+| `service/test_listing_scraper.py` | offline parser tests — run after cloning to verify setup (`python test_listing_scraper.py` → `ALL TESTS PASSED`) |
 | `run.ps1` | One-command PowerShell setup & run |
 | `Dockerfile`, `requirements.txt` | Deployment |
+| `cloudbuild.yaml`, `fly.toml`, `render.yaml` | Per-platform deploy configs |
 | `cloudflare-worker/` | Serverless API version (JS) — deploy with `wrangler deploy`; see its README |
 
-`listing_scraper.py` also works standalone:
+`listing_scraper.py` also works standalone (from `service/`):
 `python listing_scraper.py "<url>" --stealth --pretty`
 
 ## Output schema (both platforms normalized)
@@ -140,6 +148,12 @@ Production knobs: `SCRAPER_PROXY` (rotating residential proxy — strongly
 recommended at volume; makes the retry and enrichment steps far more reliable),
 `SCRAPER_CACHE_DIR`, `SCRAPER_CACHE_TTL` (default 1 h). Retries with exponential
 backoff, ~1.5 s polite rate limit, structured error codes.
+
+**Failure alert emails** (`app.py` + `alerts.py`): when a scrape is blocked,
+fails to fetch/parse, comes back empty, or parses but is missing key sections
+(thin content — often a markup change), the API sends a SendGrid email instead
+of failing silently. See `DEPLOY_GCP.md` → "Failure alert emails" for setup
+(`SENDGRID_API_KEY`, `ALERT_EMAIL_TO`, `ALERT_EMAIL_FROM`, `ALERT_COOLDOWN_S`).
 
 ## Known limitations
 

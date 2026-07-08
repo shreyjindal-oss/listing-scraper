@@ -909,8 +909,19 @@ def _host_matches(host: str, domain: str) -> bool:
     return host == domain or host.endswith("." + domain)
 
 
+def _ensure_scheme(url: str) -> str:
+    """Treat a scheme-less paste like "booking.com/hotel/..." as https — a
+    plain host+path has no ambiguity about which protocol was meant, and
+    rejecting it just because the "https://" prefix got trimmed somewhere
+    upstream (copy/paste, a client that strips it for display, etc.) is
+    unnecessarily brittle."""
+    if not urlparse(url).scheme:
+        return "https://" + url
+    return url
+
+
 def detect_platform(url: str) -> str:
-    parsed = urlparse(url)
+    parsed = urlparse(_ensure_scheme(url))
     if parsed.scheme not in ("http", "https"):
         raise ScraperError("UNSUPPORTED_URL", f"Unsupported URL scheme: {parsed.scheme or '(none)'}")
     host = parsed.netloc.lower().split("@")[-1].split(":")[0]
@@ -926,6 +937,27 @@ def _is_hollow(data: dict) -> bool:
     a bot interstitial that slipped past block detection."""
     return not (data.get("title") or data.get("photos") or data.get("rooms")
                 or data.get("description"))
+
+
+def quality_issues(data: dict) -> list[str]:
+    """Best-effort signals that a *successful* (non-hollow) parse still
+    under-delivered — e.g. a markup change that silently dropped one section
+    instead of breaking the whole page. Doesn't fail the request; callers use
+    this to decide whether to raise an alert."""
+    issues = []
+    if not data.get("photos"):
+        issues.append("no photos extracted")
+    if data.get("source") == "booking.com":
+        if not data.get("rooms"):
+            issues.append("no room/rate data extracted")
+        if not data.get("amenities_flat"):
+            issues.append("no amenities extracted")
+    else:  # airbnb
+        if not data.get("amenities"):
+            issues.append("no amenities extracted")
+        if not data.get("capacity"):
+            issues.append("no capacity/guest info extracted")
+    return issues
 
 
 _fetchers: dict = {}
@@ -949,6 +981,7 @@ def _get_fetcher(cache_dir: Optional[str]) -> PageFetcher:
 
 def scrape(url: str, use_cache: bool = True, stealth: bool = False,
            cache_dir: Optional[str] = None) -> dict:
+    url = _ensure_scheme(url.strip())
     platform = detect_platform(url)
     fetcher = _get_fetcher(cache_dir)
     parser = AirbnbParser() if platform == "airbnb" else BookingParser()

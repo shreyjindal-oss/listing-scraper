@@ -1,3 +1,5 @@
+# Build context is the repo root, but only requirements.txt and service/ are
+# ever COPY'd — this just trims what gets uploaded to the Docker daemon.
 .git/
 .venv/
 .env/
@@ -9,4 +11,6 @@ cloudflare-worker/
 fly.toml
 render.yaml
 run.ps1
+cloudbuild.yaml
+test_listing_scraper.py
 *.md

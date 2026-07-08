@@ -23,13 +23,23 @@ from fastapi import FastAPI, Header
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from listing_scraper import scrape, ScraperError
+from alerts import send_alert
+from listing_scraper import scrape, ScraperError, quality_issues
 
 app = FastAPI(title="Listing Scraper Prototype")
 logger = logging.getLogger("listing_scraper")
 
 RECENT: list = []  # in-memory history of recent scrapes
 _recent_lock = threading.Lock()
+
+# UNSUPPORTED_URL is a caller mistake (bad/foreign URL), not a scraper fault —
+# every other code means the scraper itself is unhealthy and worth an email.
+_ALERT_LABELS = {
+    "BLOCKED": "Blocked by anti-bot protection",
+    "FETCH_FAILED": "Failed to fetch the page",
+    "PARSE_FAILED": "Parser found no expected markup — likely a site layout change",
+    "EMPTY_RESULT": "Fetched page but extracted no listing data (hollow/bot-interstitial page)",
+}
 
 
 class ScrapeRequest(BaseModel):
@@ -55,14 +65,39 @@ def api_scrape(req: ScrapeRequest, x_api_key: Optional[str] = Header(default=Non
     try:
         data = scrape(req.url.strip(), use_cache=not req.no_cache, stealth=req.stealth)
     except ScraperError as e:
+        if e.code != "UNSUPPORTED_URL":
+            heading = _ALERT_LABELS.get(e.code, "Scrape failed")
+            send_alert(
+                key=f"error:{e.code}",
+                subject=f"[Listing Scraper] {heading} ({e.code})",
+                severity="error",
+                heading=heading,
+                fields=[("Code", e.code), ("URL", req.url), ("Message", str(e))])
         return JSONResponse(status_code=422, content={
             "ok": False, "error": e.code, "message": str(e), "url": req.url,
             "elapsed_s": round(time.time() - started, 2)})
     except Exception:  # noqa: BLE001 — don't leak internals to the client
         logger.exception("Unhandled error scraping %s", req.url)
+        send_alert(
+            key="error:INTERNAL",
+            subject="[Listing Scraper] Internal error",
+            severity="error",
+            heading="Internal error",
+            fields=[("URL", req.url),
+                    ("Detail", "Unhandled exception — see Cloud Run logs for the traceback.")])
         return JSONResponse(status_code=500, content={
             "ok": False, "error": "INTERNAL", "message": "Internal server error", "url": req.url,
             "elapsed_s": round(time.time() - started, 2)})
+
+    issues = quality_issues(data)
+    if issues:
+        send_alert(
+            key=f"thin:{data.get('source')}",
+            subject=f"[Listing Scraper] Thin content from {data.get('source')}",
+            severity="warning",
+            heading=f"Thin content from {data.get('source')}",
+            fields=[("URL", req.url), ("Issues", ", ".join(issues))])
+
     elapsed = round(time.time() - started, 2)
     with _recent_lock:
         RECENT.insert(0, {"url": req.url, "title": data.get("title"),
