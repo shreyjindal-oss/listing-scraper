@@ -32,6 +32,7 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -68,6 +69,7 @@ class PageFetcher:
         self.max_retries = max_retries
         self.min_interval = min_interval  # polite rate limit between requests
         self._last_request_ts = 0.0
+        self._throttle_lock = threading.Lock()
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
 
@@ -98,9 +100,17 @@ class PageFetcher:
             os.remove(p)
 
     def _throttle(self) -> None:
-        elapsed = time.time() - self._last_request_ts
-        if elapsed < self.min_interval:
-            time.sleep(self.min_interval - elapsed + random.uniform(0, 0.5))
+        # lock covers the check-and-stamp so concurrent callers (threadpool
+        # requests sharing this fetcher) don't both read a stale timestamp
+        # and skip the wait.
+        with self._throttle_lock:
+            elapsed = time.time() - self._last_request_ts
+            wait = self.min_interval - elapsed
+            if wait > 0:
+                wait += random.uniform(0, 0.5)
+            self._last_request_ts = time.time() + max(wait, 0)
+        if wait > 0:
+            time.sleep(wait)
 
     # -- fetch strategies -------------------------------------------------------
 
@@ -153,7 +163,6 @@ class PageFetcher:
         last_err: Optional[Exception] = None
         for attempt in range(self.max_retries):
             self._throttle()
-            self._last_request_ts = time.time()
             try:
                 if stealth:
                     html = self._stealth_fetch(url)
@@ -171,9 +180,15 @@ class PageFetcher:
                 return html
             except ScraperError as e:
                 last_err = e
+                if e.code == "BLOCKED":
+                    # a block verdict won't change by repeating the same fetch
+                    # method again immediately — retrying just burns time
+                    # (each stealth attempt is 15-40s) for no extra chance of success.
+                    break
             except Exception as e:  # network hiccups etc.
                 last_err = e
-            time.sleep((2 ** attempt) + random.uniform(0, 1.5))
+            if attempt < self.max_retries - 1:
+                time.sleep((2 ** attempt) + random.uniform(0, 1.5))
 
         if isinstance(last_err, ScraperError):
             raise last_err
@@ -880,11 +895,28 @@ class BookingParser:
 # Orchestration
 # --------------------------------------------------------------------------- #
 
+# Airbnb's known country-code domains (subdomains of these are still Airbnb,
+# e.g. www.airbnb.com, airbnb.co.in — but "airbnb.attacker.com" is NOT, since
+# "attacker.com" isn't one of these root domains).
+_AIRBNB_ROOT_DOMAINS = (
+    "airbnb.com", "airbnb.co.in", "airbnb.co.uk", "airbnb.ca", "airbnb.com.au",
+    "airbnb.de", "airbnb.fr", "airbnb.it", "airbnb.es", "airbnb.co.jp",
+    "airbnb.com.br", "airbnb.nl", "airbnb.ie", "airbnb.pt",
+)
+
+
+def _host_matches(host: str, domain: str) -> bool:
+    return host == domain or host.endswith("." + domain)
+
+
 def detect_platform(url: str) -> str:
-    host = urlparse(url).netloc.lower()
-    if "airbnb." in host:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ScraperError("UNSUPPORTED_URL", f"Unsupported URL scheme: {parsed.scheme or '(none)'}")
+    host = parsed.netloc.lower().split("@")[-1].split(":")[0]
+    if any(_host_matches(host, d) for d in _AIRBNB_ROOT_DOMAINS):
         return "airbnb"
-    if "booking.com" in host:
+    if _host_matches(host, "booking.com"):
         return "booking"
     raise ScraperError("UNSUPPORTED_URL", f"Not an Airbnb or Booking.com URL: {host}")
 
@@ -896,14 +928,29 @@ def _is_hollow(data: dict) -> bool:
                 or data.get("description"))
 
 
+_fetchers: dict = {}
+_fetchers_lock = threading.Lock()
+
+
+def _get_fetcher(cache_dir: Optional[str]) -> PageFetcher:
+    """One PageFetcher per cache_dir/ttl config, reused across scrape() calls
+    so the polite rate-limit throttle actually applies across requests
+    instead of resetting every call."""
+    resolved_dir = cache_dir if cache_dir is not None else os.environ.get("SCRAPER_CACHE_DIR", ".scraper_cache")
+    ttl = int(os.environ.get("SCRAPER_CACHE_TTL", "3600"))
+    key = (resolved_dir, ttl)
+    with _fetchers_lock:
+        fetcher = _fetchers.get(key)
+        if fetcher is None:
+            fetcher = PageFetcher(cache_dir=resolved_dir, cache_ttl=ttl)
+            _fetchers[key] = fetcher
+        return fetcher
+
+
 def scrape(url: str, use_cache: bool = True, stealth: bool = False,
            cache_dir: Optional[str] = None) -> dict:
     platform = detect_platform(url)
-    fetcher = PageFetcher(
-        cache_dir=cache_dir if cache_dir is not None
-        else os.environ.get("SCRAPER_CACHE_DIR", ".scraper_cache"),
-        cache_ttl=int(os.environ.get("SCRAPER_CACHE_TTL", "3600")),
-    )
+    fetcher = _get_fetcher(cache_dir)
     parser = AirbnbParser() if platform == "airbnb" else BookingParser()
 
     def attempt(use_stealth: bool, allow_cache: bool) -> dict:

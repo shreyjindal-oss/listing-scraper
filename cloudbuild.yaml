@@ -12,19 +12,36 @@ substitutions:
   _REPO: listing-scraper
 
 steps:
+  # pull the last built image (if any) so `docker build --cache-from` can
+  # reuse its layers — including the big `pyd4vinci/scrapling` base pull,
+  # which is most of the ~10-15 min cold build time. Cloud Build workers are
+  # ephemeral, so without this every build re-downloads the base image.
+  - id: pull-cache
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        docker pull ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest || exit 0
+
   - id: build
     name: gcr.io/cloud-builders/docker
     args:
       - build
+      - --cache-from
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
       - -t
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$BUILD_ID
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
       - .
 
   - id: push
     name: gcr.io/cloud-builders/docker
     args:
       - push
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}
 
   - id: deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
@@ -33,7 +50,7 @@ steps:
       - run
       - deploy
       - ${_SERVICE}
-      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$BUILD_ID
       - --region=${_REGION}
       - --memory=2Gi
       - --cpu=2
@@ -42,9 +59,14 @@ steps:
       - --min-instances=0
       - --max-instances=3
       - --allow-unauthenticated
+      # requires: echo -n "KEY" | gcloud secrets create scraper-api-key --data-file=-
+      # (see DEPLOY_GCP.md "Better secret handling") — remove this line if you
+      # don't want to gate the API with a key.
+      - --set-secrets=API_KEY=scraper-api-key:latest
 
 images:
-  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$BUILD_ID
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
 
 options:
   machineType: E2_HIGHCPU_8   # the base image is large; speeds up builds

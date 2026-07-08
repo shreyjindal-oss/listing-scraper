@@ -13,7 +13,9 @@ API:
     GET  /api/health
 """
 
+import logging
 import os
+import threading
 import time
 from typing import Optional
 
@@ -24,8 +26,10 @@ from pydantic import BaseModel
 from listing_scraper import scrape, ScraperError
 
 app = FastAPI(title="Listing Scraper Prototype")
+logger = logging.getLogger("listing_scraper")
 
 RECENT: list = []  # in-memory history of recent scrapes
+_recent_lock = threading.Lock()
 
 
 class ScrapeRequest(BaseModel):
@@ -54,20 +58,23 @@ def api_scrape(req: ScrapeRequest, x_api_key: Optional[str] = Header(default=Non
         return JSONResponse(status_code=422, content={
             "ok": False, "error": e.code, "message": str(e), "url": req.url,
             "elapsed_s": round(time.time() - started, 2)})
-    except Exception as e:  # noqa: BLE001 — surface anything unexpected to the UI
+    except Exception:  # noqa: BLE001 — don't leak internals to the client
+        logger.exception("Unhandled error scraping %s", req.url)
         return JSONResponse(status_code=500, content={
-            "ok": False, "error": "INTERNAL", "message": str(e), "url": req.url,
+            "ok": False, "error": "INTERNAL", "message": "Internal server error", "url": req.url,
             "elapsed_s": round(time.time() - started, 2)})
     elapsed = round(time.time() - started, 2)
-    RECENT.insert(0, {"url": req.url, "title": data.get("title"),
-                      "source": data.get("source"), "elapsed_s": elapsed})
-    del RECENT[10:]
+    with _recent_lock:
+        RECENT.insert(0, {"url": req.url, "title": data.get("title"),
+                          "source": data.get("source"), "elapsed_s": elapsed})
+        del RECENT[10:]
     return {"ok": True, "elapsed_s": elapsed, "data": data}
 
 
 @app.get("/api/recent")
 def recent():
-    return RECENT
+    with _recent_lock:
+        return list(RECENT)
 
 
 PAGE = r"""<!DOCTYPE html>
@@ -172,6 +179,7 @@ const EXAMPLES = [
   ["Booking · London apartments", "https://www.booking.com/hotel/gb/queens-park-apartments-by-flying-butler.en-gb.html?checkin=2026-07-13&checkout=2026-07-17&group_adults=2&no_rooms=1"],
 ];
 let LAST = null;
+const API_KEY = "__API_KEY__";
 
 document.getElementById('examples').innerHTML =
   EXAMPLES.map(e=>`<span class="chip" onclick="document.getElementById('url').value='${e[1]}'">${e[0]}</span>`).join('');
@@ -189,7 +197,9 @@ async function run(){
   st.innerHTML = `<span class="spin"></span>Scraping${stealth?' with stealth browser (can take 15–40 s)':''}…`;
   document.getElementById('tabs').style.display = 'none';
   try{
-    const r = await fetch('/api/scrape', {method:'POST', headers:{'Content-Type':'application/json'},
+    const headers = {'Content-Type':'application/json'};
+    if (API_KEY) headers['X-API-Key'] = API_KEY;
+    const r = await fetch('/api/scrape', {method:'POST', headers,
       body: JSON.stringify({url, stealth, no_cache: document.getElementById('nocache').checked})});
     const j = await r.json();
     if(!j.ok){ st.className='status err'; st.textContent = `✕ ${j.error}: ${j.message} (${j.elapsed_s}s)`; return; }
@@ -285,4 +295,5 @@ function download(){
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return PAGE
+    key = os.environ.get("API_KEY", "")
+    return PAGE.replace("__API_KEY__", key.replace("\\", "\\\\").replace('"', '\\"'))
