@@ -128,6 +128,27 @@ class PageFetcher:
         low = html[:20000].lower()
         return len(html) < 5000 or any(m in low for m in BLOCK_MARKERS)
 
+    @staticmethod
+    def _scroll_page(page) -> None:
+        """Booking (and Airbnb) lazy-load several sections — e.g. Booking's
+        full facilities list — via an IntersectionObserver that only fires
+        once the section scrolls into view; it never loads on page-load
+        alone, even with JS rendering. Scroll through the page so those XHRs
+        actually fire before the HTML is captured. Capped at 25 steps so a
+        page with a broken/infinite scroll height can't hang the fetch."""
+        try:
+            pos = 0
+            for _ in range(25):
+                height = page.evaluate("document.body.scrollHeight")
+                if pos >= height:
+                    break
+                pos += 800
+                page.evaluate(f"window.scrollTo(0, {pos})")
+                page.wait_for_timeout(250)
+            page.wait_for_timeout(1000)  # let the final lazy-load XHRs settle
+        except Exception:
+            pass  # best-effort — never fail the fetch over a scroll hiccup
+
     def _http_fetch(self, url: str) -> Optional[str]:
         """Fast path: Scrapling Fetcher with Chrome TLS-fingerprint impersonation."""
         from scrapling.fetchers import Fetcher
@@ -143,7 +164,7 @@ class PageFetcher:
     def _stealth_fetch(self, url: str) -> str:
         """Slow path: headless stealth browser. Renders JS (Airbnb pricing)."""
         from scrapling.fetchers import StealthyFetcher
-        kwargs = {"headless": True, "network_idle": True}
+        kwargs = {"headless": True, "network_idle": True, "page_action": self._scroll_page}
         if self.proxy:
             kwargs["proxy"] = self.proxy
         page = StealthyFetcher.fetch(url, **kwargs)
@@ -1015,13 +1036,14 @@ def scrape(url: str, use_cache: bool = True, stealth: bool = False,
                 e2.code, f"{e2} — retried with stealth browser and still failed; "
                          f"try again in a minute or set SCRAPER_PROXY") from e2
 
-    # Booking A/B-serves page variants; some carry only a handful of amenity
-    # badges. If the amenity yield looks thin, try the other fetch mode once
-    # and keep whichever amenity set is richer.
+    # Booking's full facilities list is lazy-loaded (see _scroll_page) and
+    # never appears in a plain HTTP fetch, which only sees the small "most
+    # popular facilities" block. If the amenity yield looks thin, retry once
+    # with the stealth browser and keep whichever amenity set is richer.
     #
     # Skip this when the result already came from the stealth browser: that
-    # path is slow (~30 s) and usually already returns the rich variant, so a
-    # second stealth render rarely helps and would roughly double latency.
+    # path is slow (~30 s) and already scrolls for the full list, so a second
+    # stealth render rarely helps and would roughly double latency.
     if (platform == "booking" and not used_stealth
             and len(data.get("amenities_flat") or []) < 8):
         try:

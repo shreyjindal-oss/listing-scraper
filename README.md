@@ -158,10 +158,13 @@ of failing silently. See `DEPLOY_GCP.md` → "Failure alert emails" for setup
 ## Known limitations
 
 - Airbnb pricing requires stealth mode (client-side rendered).
-- Booking.com groups a handful of property-level amenities (e.g. fire
-  extinguishers, CCTV, 24-hour security) that load via a client-side API and
-  never appear in the fetched HTML — expect most, but not 100%, of the amenity
-  chips shown on the page. Everything in the room facility lists is captured.
+- Booking.com's full facilities list loads via an IntersectionObserver — it
+  never appears on page-load alone, even with JS rendering, only once that
+  section scrolls into view. The stealth fetch scrolls the page to trigger it
+  (see `PageFetcher._scroll_page`), so the full list is captured whenever a
+  scrape escalates to stealth (either explicitly or via the thin-amenity
+  retry). A plain, non-stealth fetch still only sees the small "most popular
+  facilities" block, since it never runs JS at all.
 - Booking.com full review texts load via JS; only featured/server-rendered
   reviews are captured.
 - The thin-amenity enrichment retry helps only when the alternate fetch mode
