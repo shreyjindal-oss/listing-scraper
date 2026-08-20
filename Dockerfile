@@ -8,6 +8,15 @@ WORKDIR /srv
 COPY requirements.txt .
 RUN uv pip install --python /app/.venv/bin/python3 fastapi uvicorn pydantic
 
+# The base image bundles browsers, but the stealth browser build
+# (patchright/Camoufox) can drift from the installed Scrapling version — on
+# Cloud Run that surfaced as "Executable doesn't exist … chromium-1228 / run
+# patchright install", so every stealth fetch failed. Install the exact
+# browsers this Scrapling needs so StealthyFetcher can actually launch.
+# Try Scrapling's own installer first; fall back to patchright's chromium.
+RUN /app/.venv/bin/python -c "from scrapling.cli import install; install([], standalone_mode=False)" \
+    || /app/.venv/bin/python -m patchright install chromium --with-deps
+
 # Copy the whole service/ directory (flattened into WORKDIR) instead of
 # naming its files individually — a hand-maintained list silently drops new
 # modules (this already broke a deploy once when alerts.py wasn't listed
