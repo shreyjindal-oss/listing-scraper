@@ -8,14 +8,20 @@ WORKDIR /srv
 COPY requirements.txt .
 RUN uv pip install --python /app/.venv/bin/python3 fastapi uvicorn pydantic
 
-# The base image bundles browsers, but the stealth browser build
-# (patchright/Camoufox) can drift from the installed Scrapling version — on
-# Cloud Run that surfaced as "Executable doesn't exist … chromium-1228 / run
-# patchright install", so every stealth fetch failed. Install the exact
-# browsers this Scrapling needs so StealthyFetcher can actually launch.
-# Try Scrapling's own installer first; fall back to patchright's chromium.
-RUN /app/.venv/bin/python -c "from scrapling.cli import install; install([], standalone_mode=False)" \
+# Scrapling's stealth fetch drives a *patchright* Chromium (a Playwright fork);
+# on Cloud Run its browser was missing → "Executable doesn't exist …
+# chromium-1228 / run patchright install", so every stealth fetch failed.
+# Install patchright's Chromium explicitly (the browser the error asks for) —
+# do NOT gate it behind `scrapling install`, which only installs Camoufox and
+# would mask the still-missing patchright browser. Also run scrapling's own
+# installer (Camoufox) best-effort for the paths that use it.
+RUN /app/.venv/bin/patchright install chromium --with-deps \
     || /app/.venv/bin/python -m patchright install chromium --with-deps
+RUN /app/.venv/bin/python -c "from scrapling.cli import install; install([], standalone_mode=False)" || true
+# Fail the build if the patchright Chromium the runtime needs isn't present,
+# so a broken image never ships (this was silently reaching production before).
+RUN test -x "$(ls -d /root/.cache/ms-playwright/chromium-*/chrome-linux*/chrome 2>/dev/null | head -1)" \
+    && echo "patchright chromium OK"
 
 # Copy the whole service/ directory (flattened into WORKDIR) instead of
 # naming its files individually — a hand-maintained list silently drops new
