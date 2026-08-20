@@ -51,6 +51,25 @@ def _should_send(key: str) -> bool:
         return True
 
 
+# Rolling per-key hit timestamps, for rate-gated alerts.
+_hits: dict[str, list[float]] = {}
+
+
+def _rate_ok(key: str, threshold: int, window_s: int) -> bool:
+    """Record one occurrence of `key` and report whether it has now happened
+    at least `threshold` times within the last `window_s` seconds. With
+    threshold<=1 this is always True (immediate alert). Used to suppress
+    one-off / transient failures and only email once something is a pattern."""
+    if threshold <= 1:
+        return True
+    now = time.time()
+    with _lock:
+        hits = [t for t in _hits.get(key, []) if now - t < window_s]
+        hits.append(now)
+        _hits[key] = hits
+        return len(hits) >= threshold
+
+
 def _render(severity: str, heading: str, fields: list[tuple[str, str]]) -> tuple[str, str]:
     """Build (plain_text, html) bodies for the same alert content."""
     style = _SEVERITIES.get(severity, _SEVERITIES["error"])
@@ -113,7 +132,8 @@ def _render(severity: str, heading: str, fields: list[tuple[str, str]]) -> tuple
 
 
 def send_alert(key: str, subject: str, severity: str, heading: str,
-               fields: list[tuple[str, str]]) -> None:
+               fields: list[tuple[str, str]],
+               threshold: int = 1, window_s: int = 1800) -> None:
     """Send an alert email, at most once per `key` per cooldown window.
 
     `key` identifies the *kind* of failure (e.g. "error:BLOCKED",
@@ -121,9 +141,15 @@ def send_alert(key: str, subject: str, severity: str, heading: str,
     different kind still gets through immediately. `severity` is "error" or
     "warning" (controls the accent color); `fields` are the label/value rows
     shown in the card, in order.
+
+    `threshold` rate-gates noisy/transient failures: the email is sent only
+    once this `key` has occurred `threshold`+ times within `window_s`. Leave at
+    1 for structural failures worth an immediate heads-up (e.g. markup breaks).
     """
     if not os.environ.get("SENDGRID_API_KEY"):
         logger.warning("SENDGRID_API_KEY not set — skipping alert: %s", subject)
+        return
+    if not _rate_ok(key, threshold, window_s):
         return
     if not _should_send(key):
         return

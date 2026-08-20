@@ -46,6 +46,17 @@ _ALERT_LABELS = {
     "EMPTY_RESULT": "Fetched page but extracted no listing data (hollow/bot-interstitial page)",
 }
 
+# Alert hygiene: how many times a noisy/transient failure kind must occur
+# within the rate window before it emails. Structural failures (PARSE_FAILED,
+# EMPTY_RESULT, INTERNAL) stay at 1 = immediate, since they always mean the
+# scraper needs attention. BLOCKED/FETCH_FAILED (transient/IP) and thin-content
+# (often just a listing with no availability) only email once they're a
+# pattern — one-offs are still counted for the daily digest.
+_RATE_WINDOW_S = int(os.environ.get("ALERT_RATE_WINDOW_S", "1800"))
+_BLOCK_THRESHOLD = int(os.environ.get("ALERT_BLOCK_THRESHOLD", "3"))
+_THIN_THRESHOLD = int(os.environ.get("ALERT_THIN_THRESHOLD", "5"))
+_IMMEDIATE_CODES = {"PARSE_FAILED", "EMPTY_RESULT", "INTERNAL"}
+
 
 class ScrapeRequest(BaseModel):
     url: str
@@ -73,12 +84,16 @@ def api_scrape(req: ScrapeRequest, x_api_key: Optional[str] = Header(default=Non
         STATS.record(ok=False, source=_url_source(req.url), error=e.code)
         if e.code != "UNSUPPORTED_URL":
             heading = _ALERT_LABELS.get(e.code, "Scrape failed")
+            # structural failures alert immediately; transient/IP ones (BLOCKED,
+            # FETCH_FAILED) only once they're a sustained pattern
+            threshold = 1 if e.code in _IMMEDIATE_CODES else _BLOCK_THRESHOLD
             send_alert(
                 key=f"error:{e.code}",
                 subject=f"[Listing Scraper] {heading} ({e.code})",
                 severity="error",
                 heading=heading,
-                fields=[("Code", e.code), ("URL", req.url), ("Message", str(e))])
+                fields=[("Code", e.code), ("URL", req.url), ("Message", str(e))],
+                threshold=threshold, window_s=_RATE_WINDOW_S)
         return JSONResponse(status_code=422, content={
             "ok": False, "error": e.code, "message": str(e), "url": req.url,
             "elapsed_s": round(time.time() - started, 2)})
@@ -99,12 +114,15 @@ def api_scrape(req: ScrapeRequest, x_api_key: Optional[str] = Header(default=Non
     issues = quality_issues(data)
     STATS.record(ok=True, source=data.get("source"), thin=bool(issues))
     if issues:
+        # thin content is low-signal per-request (could just be no availability)
+        # — only email once it's a pattern; every case is still in the digest
         send_alert(
             key=f"thin:{data.get('source')}",
             subject=f"[Listing Scraper] Thin content from {data.get('source')}",
             severity="warning",
             heading=f"Thin content from {data.get('source')}",
-            fields=[("URL", req.url), ("Issues", ", ".join(issues))])
+            fields=[("URL", req.url), ("Issues", ", ".join(issues))],
+            threshold=_THIN_THRESHOLD, window_s=_RATE_WINDOW_S)
 
     elapsed = round(time.time() - started, 2)
     with _recent_lock:

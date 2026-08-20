@@ -105,8 +105,39 @@ Notes:
 - Repeat alerts of the same kind are throttled to one per `ALERT_COOLDOWN_S`
   (default 900s/15min) per instance, so a persistent break doesn't flood your
   inbox on every request.
+- **Rate-gating** keeps one-off/transient failures out of your inbox. Structural
+  failures (`PARSE_FAILED`, `EMPTY_RESULT`, internal errors) email immediately.
+  Transient ones only email once they're a pattern within `ALERT_RATE_WINDOW_S`
+  (default 1800s): `BLOCKED`/`FETCH_FAILED` after `ALERT_BLOCK_THRESHOLD`
+  (default 3), thin content after `ALERT_THIN_THRESHOLD` (default 5). Every
+  case is still counted in the daily digest, so nothing is lost — you just stop
+  getting an email per bad URL.
 - If `SENDGRID_API_KEY` isn't set, alerting silently no-ops (logged once per
   attempt) — the service still works normally, you just won't get emails.
+
+## Residential proxy (recommended for reliability)
+
+Cloud Run egresses from Google datacenter IPs, which Airbnb and Booking
+increasingly block — the recurring `BLOCKED` alerts ("blocked even with the
+stealth browser") come from this. A rotating **residential** proxy is the only
+thing that meaningfully lowers the block rate; the scraper routes both the fast
+and stealth fetches through it when `SCRAPER_PROXY` is set.
+
+```bash
+echo -n "http://USER:PASS@proxy-host:PORT" | gcloud secrets create scraper-proxy --data-file=-
+
+gcloud run services update listing-scraper-stealth \
+  --region asia-south1 \
+  --set-secrets SCRAPER_PROXY=scraper-proxy:latest
+```
+
+Notes:
+- Use a **residential/ISP** proxy pool (datacenter proxies get blocked too).
+  Any provider that gives an `http://user:pass@host:port` endpoint works.
+- Leave it unset to run without a proxy — the scraper still works, just with a
+  higher block rate on Cloud Run.
+- Combine with the rate-gating above: once the proxy is in place, `BLOCKED`
+  alerts should largely disappear.
 
 ## Daily usage digest (optional)
 
