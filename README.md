@@ -59,6 +59,14 @@ GET  /api/stats            # live usage counters (API-key protected)
 POST /admin/daily-report   # email the daily usage digest + reset (API-key protected)
 ```
 
+**Accepted URLs** — only real listing pages are scraped; anything else returns
+`UNSUPPORTED_URL` (fast, and not alerted):
+- Airbnb: `/rooms/<id>` (also `/rooms/plus/<id>`, `/luxury/listing/<id>`, `/h/<slug>`).
+  Host dashboards (`/hosting/…`, `/multicalendar`), search (`/s/…`) and iCal
+  feeds (`/calendar/ical/….ics`) are rejected.
+- Booking: `booking.com/hotel/<country>/<name>` or `Share-` links. The extranet
+  (`admin.booking.com`, `/hotel/hoteladmin/…`) and account/secure hosts are rejected.
+
 PowerShell test call:
 ```powershell
 Invoke-RestMethod -Uri http://localhost:8000/api/scrape -Method Post `

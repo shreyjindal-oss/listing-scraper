@@ -930,6 +930,44 @@ def _host_matches(host: str, domain: str) -> bool:
     return host == domain or host.endswith("." + domain)
 
 
+# A real Airbnb listing URL always has /rooms/<id> (also /rooms/plus/<id> and
+# Airbnb Luxe /luxury/listing/<id>, plus vanity /h/<slug> links). This allowlist
+# rejects the flood of non-listing URLs seen in production — host dashboards
+# (/hosting/…, /multicalendar), search pages (/s/…), and iCal feeds
+# (/calendar/ical/….ics) — which can never yield listing data.
+_AIRBNB_LISTING_RE = re.compile(r"/(?:rooms|luxury/listing)/", re.I)
+
+# Booking listing pages live on (www.)booking.com at /hotel/<cc>/<slug>, or as
+# short Share- links. Everything else on the domain — the extranet admin
+# (admin.booking.com, /hotel/hoteladmin/…), account/secure subdomains, search
+# results — is not a listing.
+_BOOKING_NONLISTING_HOSTS = {"admin.booking.com", "secure.booking.com", "account.booking.com"}
+
+
+def _reject_nonlisting(platform: str, host: str, path: str) -> None:
+    """Raise UNSUPPORTED_URL for URLs that are on the right domain but aren't a
+    listing page. UNSUPPORTED_URL is treated as a caller mistake (no alert),
+    so this keeps garbage URLs from generating scrape work and alert noise."""
+    p = path or "/"
+    if platform == "airbnb":
+        if p.startswith("/h/"):
+            return  # vanity listing link → resolves to /rooms/<id>
+        if not _AIRBNB_LISTING_RE.search(p):
+            raise ScraperError(
+                "UNSUPPORTED_URL",
+                f"Not an Airbnb listing page (expected /rooms/<id>): {p}")
+    else:  # booking
+        if host in _BOOKING_NONLISTING_HOSTS:
+            raise ScraperError("UNSUPPORTED_URL", f"Not a Booking.com listing host: {host}")
+        low = p.lower()
+        is_hotel = "/hotel/" in low and "/hotel/hoteladmin" not in low
+        is_share = low.startswith("/share-") or host.startswith("share.")
+        if not (is_hotel or is_share):
+            raise ScraperError(
+                "UNSUPPORTED_URL",
+                f"Not a Booking.com listing page (expected /hotel/<country>/<name>): {p}")
+
+
 def _ensure_scheme(url: str) -> str:
     """Treat a scheme-less paste like "booking.com/hotel/..." as https — a
     plain host+path has no ambiguity about which protocol was meant, and
@@ -947,8 +985,10 @@ def detect_platform(url: str) -> str:
         raise ScraperError("UNSUPPORTED_URL", f"Unsupported URL scheme: {parsed.scheme or '(none)'}")
     host = parsed.netloc.lower().split("@")[-1].split(":")[0]
     if any(_host_matches(host, d) for d in _AIRBNB_ROOT_DOMAINS):
+        _reject_nonlisting("airbnb", host, parsed.path)
         return "airbnb"
     if _host_matches(host, "booking.com"):
+        _reject_nonlisting("booking", host, parsed.path)
         return "booking"
     raise ScraperError("UNSUPPORTED_URL", f"Not an Airbnb or Booking.com URL: {host}")
 
@@ -1036,23 +1076,31 @@ def scrape(url: str, use_cache: bool = True, stealth: bool = False,
                 e2.code, f"{e2} — retried with stealth browser and still failed; "
                          f"try again in a minute or set SCRAPER_PROXY") from e2
 
-    # Booking's full facilities list is lazy-loaded (see _scroll_page) and
-    # never appears in a plain HTTP fetch, which only sees the small "most
-    # popular facilities" block. If the amenity yield looks thin, retry once
-    # with the stealth browser and keep whichever amenity set is richer.
+    # Booking serves two things only the JS-rendered (stealth) path reliably
+    # gets: the full facilities list (lazy-loaded via IntersectionObserver, see
+    # _scroll_page) and, on some variants, the room/rate table itself. A plain
+    # HTTP fetch can come back with the "most popular facilities" block but no
+    # rooms — the single most common "thin content" alert in production. So if
+    # EITHER amenities look thin OR there are no rooms, retry once with stealth
+    # and keep whichever set is richer.
     #
-    # Skip this when the result already came from the stealth browser: that
-    # path is slow (~30 s) and already scrolls for the full list, so a second
-    # stealth render rarely helps and would roughly double latency.
+    # Skip when the result already came from stealth: that path is slow (~30 s)
+    # and already scrolls, so a second render rarely helps and doubles latency.
     if (platform == "booking" and not used_stealth
-            and len(data.get("amenities_flat") or []) < 8):
+            and (len(data.get("amenities_flat") or []) < 8 or not data.get("rooms"))):
         try:
-            alt = attempt(not used_stealth, False)
+            alt = attempt(True, False)
             if len(alt.get("amenities_flat") or []) > len(data.get("amenities_flat") or []):
                 data["amenities"] = alt["amenities"]
                 data["amenities_flat"] = alt["amenities_flat"]
-                # room facilities usually come from the same variant — take the
-                # richer set there too when room names line up
+            if len(alt.get("rooms") or []) > len(data.get("rooms") or []):
+                # stealth found the rate table the fast fetch missed — take its
+                # rooms and the pricing derived from them
+                data["rooms"] = alt["rooms"]
+                if alt.get("pricing"):
+                    data["pricing"] = alt["pricing"]
+            else:
+                # same room set — still merge any richer per-room facilities
                 alt_rooms = {r["name"]: r for r in alt.get("rooms") or []}
                 for room in data.get("rooms") or []:
                     twin = alt_rooms.get(room["name"])

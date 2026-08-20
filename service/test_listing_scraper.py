@@ -249,6 +249,30 @@ def main():
     except ls.ScraperError as e:
         ok &= check("detect unsupported", e.code == "UNSUPPORTED_URL")
 
+    # Non-listing URLs on the right domain must be rejected as UNSUPPORTED_URL
+    # (real cases pulled from production alert emails — host dashboards, search,
+    # iCal feeds, Booking extranet). These generated ~40% of the alert noise.
+    non_listing = [
+        "https://www.airbnb.co.uk/hosting/listings/editor/1643406841302834705/details",
+        "https://www.airbnb.co.uk/multicalendar",
+        "https://www.airbnb.co.uk/s/South-Delhi/homes?x=1",
+        "https://www.airbnb.co.uk/calendar/ical/1660990014735101562.ics?t=abc",
+        "https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/home.html",
+    ]
+    for u in non_listing:
+        try:
+            ls.detect_platform(u)
+            ok &= check(f"reject non-listing {u[:40]}", False)
+        except ls.ScraperError as e:
+            ok &= check(f"reject non-listing {u[:40]}", e.code == "UNSUPPORTED_URL")
+
+    # Real listing URLs (incl. Booking Share- links and Airbnb /rooms/plus/)
+    # must still be accepted.
+    ok &= check("accept airbnb rooms/plus",
+                ls.detect_platform("https://www.airbnb.com/rooms/plus/12345") == "airbnb")
+    ok &= check("accept booking share link",
+                ls.detect_platform("https://www.booking.com/Share-0sF9N56") == "booking")
+
     print("\nALL TESTS PASSED" if ok else "\nSOME TESTS FAILED")
     return 0 if ok else 1
 
