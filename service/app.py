@@ -23,8 +23,13 @@ from fastapi import FastAPI, Header
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from alerts import send_alert
+from alerts import send_alert, send_daily_digest, STATS
 from listing_scraper import scrape, ScraperError, quality_issues
+
+
+def _url_source(url: str) -> str:
+    u = (url or "").lower()
+    return "airbnb" if "airbnb." in u else "booking.com" if "booking.com" in u else "unknown"
 
 app = FastAPI(title="Listing Scraper Prototype")
 logger = logging.getLogger("listing_scraper")
@@ -65,6 +70,7 @@ def api_scrape(req: ScrapeRequest, x_api_key: Optional[str] = Header(default=Non
     try:
         data = scrape(req.url.strip(), use_cache=not req.no_cache, stealth=req.stealth)
     except ScraperError as e:
+        STATS.record(ok=False, source=_url_source(req.url), error=e.code)
         if e.code != "UNSUPPORTED_URL":
             heading = _ALERT_LABELS.get(e.code, "Scrape failed")
             send_alert(
@@ -77,6 +83,7 @@ def api_scrape(req: ScrapeRequest, x_api_key: Optional[str] = Header(default=Non
             "ok": False, "error": e.code, "message": str(e), "url": req.url,
             "elapsed_s": round(time.time() - started, 2)})
     except Exception:  # noqa: BLE001 — don't leak internals to the client
+        STATS.record(ok=False, source=_url_source(req.url), error="INTERNAL")
         logger.exception("Unhandled error scraping %s", req.url)
         send_alert(
             key="error:INTERNAL",
@@ -90,6 +97,7 @@ def api_scrape(req: ScrapeRequest, x_api_key: Optional[str] = Header(default=Non
             "elapsed_s": round(time.time() - started, 2)})
 
     issues = quality_issues(data)
+    STATS.record(ok=True, source=data.get("source"), thin=bool(issues))
     if issues:
         send_alert(
             key=f"thin:{data.get('source')}",
@@ -110,6 +118,34 @@ def api_scrape(req: ScrapeRequest, x_api_key: Optional[str] = Header(default=Non
 def recent():
     with _recent_lock:
         return list(RECENT)
+
+
+def _check_admin(x_api_key: Optional[str]) -> Optional[JSONResponse]:
+    required = os.environ.get("API_KEY")
+    if required and x_api_key != required:
+        return JSONResponse(status_code=401, content={
+            "ok": False, "error": "UNAUTHORIZED", "message": "Missing or invalid X-API-Key header"})
+    return None
+
+
+@app.get("/api/stats")
+def stats(x_api_key: Optional[str] = Header(default=None)):
+    """Live in-memory usage counters (does not reset)."""
+    denied = _check_admin(x_api_key)
+    if denied:
+        return denied
+    return {"ok": True, "alerting_configured": bool(os.environ.get("SENDGRID_API_KEY")),
+            "stats": STATS.snapshot()}
+
+
+@app.post("/admin/daily-report")
+def daily_report(x_api_key: Optional[str] = Header(default=None)):
+    """Email the day's usage digest and reset counters. Trigger once a day via
+    Cloud Scheduler (see DEPLOY_GCP.md)."""
+    denied = _check_admin(x_api_key)
+    if denied:
+        return denied
+    return {"ok": True, **send_daily_digest()}
 
 
 PAGE = r"""<!DOCTYPE html>

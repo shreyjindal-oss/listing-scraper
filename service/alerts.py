@@ -36,6 +36,7 @@ _lock = threading.Lock()
 _SEVERITIES = {
     "error":   {"accent": "#dc2626", "tint": "#fef2f2", "label": "Error"},
     "warning": {"accent": "#d97706", "tint": "#fffbeb", "label": "Warning"},
+    "info":    {"accent": "#2563eb", "tint": "#eff6ff", "label": "Info"},
 }
 
 
@@ -121,8 +122,7 @@ def send_alert(key: str, subject: str, severity: str, heading: str,
     "warning" (controls the accent color); `fields` are the label/value rows
     shown in the card, in order.
     """
-    api_key = os.environ.get("SENDGRID_API_KEY")
-    if not api_key:
+    if not os.environ.get("SENDGRID_API_KEY"):
         logger.warning("SENDGRID_API_KEY not set — skipping alert: %s", subject)
         return
     if not _should_send(key):
@@ -130,7 +130,16 @@ def send_alert(key: str, subject: str, severity: str, heading: str,
 
     fields = [*fields, ("Time (UTC)", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))]
     text_body, html_body = _render(severity, heading, fields)
+    _post_email(subject, text_body, html_body)
 
+
+def _post_email(subject: str, text_body: str, html_body: str) -> bool:
+    """Send one email via SendGrid. Returns True on success, False otherwise.
+    Never raises — alerting must not break a scrape."""
+    api_key = os.environ.get("SENDGRID_API_KEY")
+    if not api_key:
+        logger.warning("SENDGRID_API_KEY not set — skipping email: %s", subject)
+        return False
     to_addr = os.environ.get("ALERT_EMAIL_TO", "shrey.jindal@thesqua.re")
     from_addr = os.environ.get("ALERT_EMAIL_FROM", "noreply@thesqua.re")
     payload = {
@@ -151,8 +160,88 @@ def send_alert(key: str, subject: str, severity: str, heading: str,
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             if resp.status >= 300:
-                logger.error("SendGrid alert failed: HTTP %s", resp.status)
+                logger.error("SendGrid send failed: HTTP %s", resp.status)
+                return False
+        return True
     except urllib.error.HTTPError as e:
-        logger.error("SendGrid alert failed: HTTP %s — %s", e.code, e.read()[:500])
+        logger.error("SendGrid send failed: HTTP %s — %s", e.code, e.read()[:500])
+        return False
     except urllib.error.URLError as e:
-        logger.error("SendGrid alert failed: %s", e)
+        logger.error("SendGrid send failed: %s", e)
+        return False
+
+
+# --------------------------------------------------------------------------- #
+# Usage tracking + daily digest
+# --------------------------------------------------------------------------- #
+
+class UsageStats:
+    """In-memory request counters. NOTE: per-instance — on Cloud Run with
+    autoscaling, totals split across instances and reset on scale-to-zero.
+    Run with a single always-on instance for exact daily figures, or move this
+    to a shared store (Firestore) if you outgrow that. See DEPLOY_GCP.md."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.reset()
+
+    def reset(self):
+        with self._lock:
+            self.since = datetime.now(timezone.utc).isoformat()
+            self.total = 0
+            self.ok = 0
+            self.failed = 0
+            self.thin = 0
+            self.by_source: dict[str, int] = {}
+            self.by_error: dict[str, int] = {}
+
+    def record(self, *, ok: bool, source: str | None = None,
+               error: str | None = None, thin: bool = False):
+        with self._lock:
+            self.total += 1
+            if ok:
+                self.ok += 1
+            else:
+                self.failed += 1
+            if thin:
+                self.thin += 1
+            if source:
+                self.by_source[source] = self.by_source.get(source, 0) + 1
+            if error:
+                self.by_error[error] = self.by_error.get(error, 0) + 1
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "since": self.since,
+                "until": datetime.now(timezone.utc).isoformat(),
+                "total": self.total,
+                "ok": self.ok,
+                "failed": self.failed,
+                "thin": self.thin,
+                "by_source": dict(self.by_source),
+                "by_error": dict(self.by_error),
+            }
+
+
+STATS = UsageStats()
+
+
+def send_daily_digest() -> dict:
+    """Email the day's usage snapshot and reset the counters. Returns the
+    snapshot so the caller (scheduler endpoint) can report it too. Not
+    cooldown-gated — it's meant to run once a day on a schedule."""
+    snap = STATS.snapshot()
+    fields = [
+        ("Window", f"{snap['since']}  →  {snap['until']}"),
+        ("Total requests", str(snap["total"])),
+        ("Succeeded", str(snap["ok"])),
+        ("Failed", str(snap["failed"])),
+        ("Thin / degraded", f"{snap['thin']}  (succeeded but sparse — watch for drift)"),
+        ("By source", ", ".join(f"{k}={v}" for k, v in snap["by_source"].items()) or "none"),
+        ("By error", ", ".join(f"{k}={v}" for k, v in snap["by_error"].items()) or "none"),
+    ]
+    text_body, html_body = _render("info", "Daily usage digest", fields)
+    emailed = _post_email("[Listing Scraper] Daily usage digest", text_body, html_body)
+    STATS.reset()
+    return {"emailed": emailed, "digest": snap}

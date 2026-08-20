@@ -108,6 +108,30 @@ Notes:
 - If `SENDGRID_API_KEY` isn't set, alerting silently no-ops (logged once per
   attempt) — the service still works normally, you just won't get emails.
 
+## Daily usage digest (optional)
+
+Beyond failure alerts, the service tracks request counters and can email a
+once-a-day summary (total / succeeded / failed / thin, broken down by source
+and error code). Uses the same SendGrid config as above.
+
+- `GET  /api/stats` — live counters as JSON (API-key protected). Doesn't reset.
+- `POST /admin/daily-report` — emails the digest and resets the counters
+  (API-key protected).
+
+Trigger the digest once a day with Cloud Scheduler:
+
+```bash
+gcloud scheduler jobs create http listing-scraper-daily \
+  --location asia-south1 --schedule "0 9 * * *" --time-zone "Asia/Kolkata" \
+  --uri "https://SERVICE_URL/admin/daily-report" --http-method POST \
+  --headers "X-API-Key=YOUR_API_KEY"
+```
+
+> **Multi-instance note:** counters are in-memory per instance. With Cloud Run
+> autoscaling, totals split across instances and reset on scale-to-zero. For an
+> exact daily figure run with `--min-instances 1 --max-instances 1`, or move the
+> counters to a shared store (Firestore) — easy to add later.
+
 ## Continuous deployment (optional)
 
 `cloudbuild.yaml` in the repo root builds and deploys on every push. Create a

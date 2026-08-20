@@ -53,8 +53,10 @@ POST /api/scrape
 → 200 {"ok": true, "elapsed_s": 2.1, "data": { …listing json… }}
 → 422 {"ok": false, "error": "BLOCKED|UNSUPPORTED_URL|PARSE_FAILED|…", "message": "…"}
 
-GET /api/recent    # last 10 scrapes
-GET /api/health
+GET  /api/recent           # last 10 scrapes
+GET  /api/health
+GET  /api/stats            # live usage counters (API-key protected)
+POST /admin/daily-report   # email the daily usage digest + reset (API-key protected)
 ```
 
 PowerShell test call:
@@ -154,6 +156,13 @@ fails to fetch/parse, comes back empty, or parses but is missing key sections
 (thin content — often a markup change), the API sends a SendGrid email instead
 of failing silently. See `DEPLOY_GCP.md` → "Failure alert emails" for setup
 (`SENDGRID_API_KEY`, `ALERT_EMAIL_TO`, `ALERT_EMAIL_FROM`, `ALERT_COOLDOWN_S`).
+
+**Daily usage digest**: the API also tracks request counters (total / ok /
+failed / thin, by source and error). `GET /api/stats` returns them live;
+`POST /admin/daily-report` emails a summary and resets — trigger it once a day
+with Cloud Scheduler. See `DEPLOY_GCP.md` → "Daily usage digest". (Counters are
+in-memory per instance; run a single instance or use Firestore for exact totals
+under autoscaling.)
 
 ## Known limitations
 
