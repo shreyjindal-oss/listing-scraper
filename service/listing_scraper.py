@@ -457,15 +457,69 @@ class AirbnbParser:
         return out
 
     def _photos(self, root) -> list:
+        """Listing photos, cover first.
+
+        Airbnb moved photos (Nov 2026): the PDP sections' `mediaItems` is now
+        null and images live under the sibling `data.node.pdpPresentation`:
+          - heroMedia.edges[].node.image.uri      (full gallery, display order)
+          - mediaTour.stops[].items[].image.uri   (same images grouped by room)
+        Both use ImageEntity {uri, caption, altText}. The legacy
+        `mediaItems[].baseUrl` shape is still read first for older payloads.
+        """
         urls, seen = [], set()
+
+        def add(u, caption=None, room=None):
+            if not u or not isinstance(u, str):
+                return
+            key = u.split("?")[0]
+            if key in seen:
+                return
+            seen.add(key)
+            entry = {"url": key, "caption": strip_html(caption or "") or None}
+            if room:
+                entry["room"] = room
+            urls.append(entry)
+
+        # 1) legacy shape
         for item in deep_find_all(root, "mediaItems"):
             for m in item if isinstance(item, list) else [item]:
                 if isinstance(m, dict):
-                    u = m.get("baseUrl")
-                    if u and u not in seen:
-                        seen.add(u)
-                        urls.append({"url": u,
-                                     "caption": strip_html(m.get("accessibilityLabel") or "") or None})
+                    add(m.get("baseUrl"), m.get("accessibilityLabel"))
+
+        # 2) current shape: map uri -> room name from the media tour
+        room_of = {}
+        for tour in deep_find_all(root, "mediaTour"):
+            for stop in (tour or {}).get("stops") or [] if isinstance(tour, dict) else []:
+                for it in (stop or {}).get("items") or []:
+                    img = (it or {}).get("image") or {}
+                    if img.get("uri"):
+                        room_of.setdefault(img["uri"].split("?")[0], stop.get("name"))
+
+        def img_caption(img):
+            return img.get("caption") or img.get("altText") or img.get("accessibilityLabel")
+
+        for hero in deep_find_all(root, "heroMedia"):
+            for edge in (hero or {}).get("edges") or [] if isinstance(hero, dict) else []:
+                img = ((edge or {}).get("node") or {}).get("image") or {}
+                u = img.get("uri") or img.get("moderatedUri")
+                add(u, img_caption(img), room_of.get((u or "").split("?")[0]))
+
+        # tour images not in the hero list (keeps room order)
+        for tour in deep_find_all(root, "mediaTour"):
+            for stop in (tour or {}).get("stops") or [] if isinstance(tour, dict) else []:
+                for it in (stop or {}).get("items") or []:
+                    img = (it or {}).get("image") or {}
+                    add(img.get("uri"), img_caption(img), stop.get("name"))
+
+        # 3) last resort: the share/OG cover image
+        if not urls:
+            for key in ("ogImage", "imageUrl"):
+                for u in deep_find_all(root, key):
+                    if isinstance(u, str) and "/im/pictures/" in u:
+                        add(u)
+                        break
+                if urls:
+                    break
         return urls
 
     def _location(self, root, ld, page) -> dict:

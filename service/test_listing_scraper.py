@@ -177,6 +177,26 @@ def main():
     ok &= check("airbnb guests", a["capacity"]["guests"] == 8)
     ok &= check("airbnb bedrooms", a["capacity"]["bedrooms"] == 2)
     ok &= check("airbnb photos", len(a["photos"]) == 2)
+    # Nov 2026 Airbnb payload: sections' mediaItems is null; photos live in
+    # data.node.pdpPresentation.heroMedia / mediaTour (ImageEntity.uri).
+    def img(u, cap=None):
+        return {"__typename": "ImageEntity", "uri": u, "caption": cap, "altText": None}
+    U = "https://a0.muscache.com/im/pictures/hosting/Hosting-1/original/%s.jpeg"
+    new_state = {"niobeClientData": [["StaysPdpSections:{}", {"data": {
+        "presentation": {"stayProductDetailPage": {"sections": {"sections": [
+            {"sectionComponentType": "HERO_DEFAULT", "section": {"mediaItems": None}}]}}},
+        "node": {"pdpPresentation": {
+            "heroMedia": {"edges": [{"node": {"image": img(U % "a")}},
+                                    {"node": {"image": img(U % "b", "Kitchen view")}}]},
+            "mediaTour": {"stops": [
+                {"name": "Living room", "items": [{"image": img(U % "a")}]},
+                {"name": "Bathroom", "items": [{"image": img(U % "c")}]}]}}}}}]]}
+    new_html = ('<html><script id="data-deferred-state-0" type="application/json">'
+                + json.dumps(new_state) + "</script></html>")
+    ph = ls.AirbnbParser().parse(new_html, "https://www.airbnb.co.uk/rooms/1")["photos"]
+    ok &= check("airbnb photos (heroMedia/mediaTour)", [p["url"] for p in ph] == [U % "a", U % "b", U % "c"])
+    ok &= check("airbnb photo room + caption", ph[0].get("room") == "Living room"
+                and ph[1]["caption"] == "Kitchen view" and ph[2].get("room") == "Bathroom")
     ok &= check("airbnb amenities", len(a["amenities"]) == 2
                 and a["amenities"][1]["items"][0]["available"] is False)
     ok &= check("airbnb latlng", a["location"]["lat"] == 28.5493)
