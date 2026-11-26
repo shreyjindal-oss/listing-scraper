@@ -475,6 +475,8 @@ class AirbnbParser:
             if key in seen:
                 return
             seen.add(key)
+            if not isinstance(caption, str):
+                caption = None
             entry = {"url": key, "caption": strip_html(caption or "") or None}
             if room:
                 entry["room"] = room
@@ -495,8 +497,25 @@ class AirbnbParser:
                     if img.get("uri"):
                         room_of.setdefault(img["uri"].split("?")[0], stop.get("name"))
 
+        def as_text(v):
+            # captions are plain strings on some listings and MediaText objects
+            # ({"user": {"localizedString": ...}}) on others
+            if isinstance(v, str):
+                return v
+            if isinstance(v, dict):
+                for k in ("localizedStringWithTranslationPreference", "localizedString",
+                          "source", "text"):
+                    if isinstance(v.get(k), str):
+                        return v[k]
+                for sub in v.values():
+                    t = as_text(sub) if isinstance(sub, dict) else None
+                    if t:
+                        return t
+            return None
+
         def img_caption(img):
-            return img.get("caption") or img.get("altText") or img.get("accessibilityLabel")
+            return (as_text(img.get("caption")) or as_text(img.get("altText"))
+                    or as_text(img.get("accessibilityLabel")))
 
         for hero in deep_find_all(root, "heroMedia"):
             for edge in (hero or {}).get("edges") or [] if isinstance(hero, dict) else []:

@@ -195,6 +195,14 @@ def main():
                 + json.dumps(new_state) + "</script></html>")
     ph = ls.AirbnbParser().parse(new_html, "https://www.airbnb.co.uk/rooms/1")["photos"]
     ok &= check("airbnb photos (heroMedia/mediaTour)", [p["url"] for p in ph] == [U % "a", U % "b", U % "c"])
+    mt = {"__typename": "MediaText", "user": {"localizedString": "Master Bedroom", "source": "Master Bedroom"}}
+    obj_state = {"niobeClientData": [["k", {"data": {"node": {"pdpPresentation": {
+        "heroMedia": {"edges": [{"node": {"image": img(U % "d", mt)}}]},
+        "mediaTour": {"stops": [{"name": None, "items": [{"image": img(U % "d", mt)}]}]}}}}}]]}
+    ph2 = ls.AirbnbParser().parse('<html><script id="data-deferred-state-0">' + json.dumps(obj_state)
+                                  + "</script></html>", "https://www.airbnb.co.in/rooms/2")["photos"]
+    ok &= check("airbnb photo MediaText caption", len(ph2) == 1 and ph2[0]["caption"] == "Master Bedroom"
+                and "room" not in ph2[0])
     ok &= check("airbnb photo room + caption", ph[0].get("room") == "Living room"
                 and ph[1]["caption"] == "Kitchen view" and ph[2].get("room") == "Bathroom")
     ok &= check("airbnb amenities", len(a["amenities"]) == 2
