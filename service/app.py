@@ -37,7 +37,9 @@ logger = logging.getLogger("listing_scraper")
 RECENT: list = []  # in-memory history of recent scrapes
 _recent_lock = threading.Lock()
 
-# UNSUPPORTED_URL is a caller mistake (bad/foreign URL), not a scraper fault —
+# UNSUPPORTED_URL is a caller mistake (bad/foreign URL) and LISTING_NOT_FOUND
+# is a delisted/removed listing (404/410) — neither is a scraper fault, so
+# neither emails (both are still counted in /api/stats and the daily digest);
 # every other code means the scraper itself is unhealthy and worth an email.
 _ALERT_LABELS = {
     "BLOCKED": "Blocked by anti-bot protection",
@@ -56,6 +58,7 @@ _RATE_WINDOW_S = int(os.environ.get("ALERT_RATE_WINDOW_S", "1800"))
 _BLOCK_THRESHOLD = int(os.environ.get("ALERT_BLOCK_THRESHOLD", "3"))
 _THIN_THRESHOLD = int(os.environ.get("ALERT_THIN_THRESHOLD", "5"))
 _IMMEDIATE_CODES = {"PARSE_FAILED", "EMPTY_RESULT", "INTERNAL"}
+_NO_ALERT_CODES = {"UNSUPPORTED_URL", "LISTING_NOT_FOUND"}
 
 
 class ScrapeRequest(BaseModel):
@@ -82,7 +85,7 @@ def api_scrape(req: ScrapeRequest, x_api_key: Optional[str] = Header(default=Non
         data = scrape(req.url.strip(), use_cache=not req.no_cache, stealth=req.stealth)
     except ScraperError as e:
         STATS.record(ok=False, source=_url_source(req.url), error=e.code)
-        if e.code != "UNSUPPORTED_URL":
+        if e.code not in _NO_ALERT_CODES:
             heading = _ALERT_LABELS.get(e.code, "Scrape failed")
             # structural failures alert immediately; transient/IP ones (BLOCKED,
             # FETCH_FAILED) only once they're a sustained pattern

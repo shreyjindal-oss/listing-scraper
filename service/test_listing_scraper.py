@@ -203,6 +203,22 @@ def main():
                                   + "</script></html>", "https://www.airbnb.co.in/rooms/2")["photos"]
     ok &= check("airbnb photo MediaText caption", len(ph2) == 1 and ph2[0]["caption"] == "Master Bedroom"
                 and "room" not in ph2[0])
+    # delisted Airbnb listing: 410 + "404 Page Not Found" page
+    try:
+        ls.AirbnbParser().parse("<html><head><title>404 Page Not Found - Airbnb</title></head>"
+                                "<body></body></html>", "https://www.airbnb.co.uk/rooms/3")
+        ok &= check("airbnb delisted -> LISTING_NOT_FOUND", False)
+    except ls.ScraperError as e:
+        ok &= check("airbnb delisted -> LISTING_NOT_FOUND", e.code == "LISTING_NOT_FOUND")
+
+    class _Gone:
+        status = 410
+    try:
+        ls.PageFetcher._raise_if_gone(_Gone(), "https://www.airbnb.co.uk/rooms/3")
+        ok &= check("fetch 410 -> LISTING_NOT_FOUND", False)
+    except ls.ScraperError as e:
+        ok &= check("fetch 410 -> LISTING_NOT_FOUND", e.code == "LISTING_NOT_FOUND")
+
     ok &= check("airbnb photo room + caption", ph[0].get("room") == "Living room"
                 and ph[1]["caption"] == "Kitchen view" and ph[2].get("room") == "Bathroom")
     ok &= check("airbnb amenities", len(a["amenities"]) == 2

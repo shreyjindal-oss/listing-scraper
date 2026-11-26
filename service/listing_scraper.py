@@ -121,6 +121,16 @@ class PageFetcher:
             html = html.decode("utf-8", "replace")
         return html
 
+    @staticmethod
+    def _raise_if_gone(page: Any, url: str) -> None:
+        """Delisted/removed listings come back 404/410 (Airbnb serves a
+        "404 Page Not Found" page with 410). That's not a scraper fault, so
+        report it distinctly instead of as thin content / a block."""
+        if getattr(page, "status", 200) in (404, 410):
+            raise ScraperError("LISTING_NOT_FOUND",
+                               f"Listing not found or no longer available (HTTP "
+                               f"{getattr(page, 'status', '')}): {url}")
+
     def _looks_blocked(self, page: Any, html: str) -> bool:
         status = getattr(page, "status", 200)
         if status in (403, 429, 503):
@@ -156,6 +166,7 @@ class PageFetcher:
         if self.proxy:
             kwargs["proxy"] = self.proxy
         page = Fetcher.get(url, **kwargs)
+        self._raise_if_gone(page, url)
         html = self._page_html(page)
         if self._looks_blocked(page, html):
             return None
@@ -168,6 +179,7 @@ class PageFetcher:
         if self.proxy:
             kwargs["proxy"] = self.proxy
         page = StealthyFetcher.fetch(url, **kwargs)
+        self._raise_if_gone(page, url)
         html = self._page_html(page)
         if self._looks_blocked(page, html):
             raise ScraperError("BLOCKED", "Blocked even with the stealth browser — "
@@ -201,7 +213,7 @@ class PageFetcher:
                 return html
             except ScraperError as e:
                 last_err = e
-                if e.code == "BLOCKED":
+                if e.code in ("BLOCKED", "LISTING_NOT_FOUND"):
                     # a block verdict won't change by repeating the same fetch
                     # method again immediately — retrying just burns time
                     # (each stealth attempt is 15-40s) for no extra chance of success.
@@ -301,6 +313,10 @@ class AirbnbParser:
 
     def parse(self, html: str, url: str) -> dict:
         page = Selector(html)
+        title = (page.css("title::text").get() or "").strip()
+        if title.startswith("404 Page Not Found"):
+            raise ScraperError("LISTING_NOT_FOUND",
+                               f"Listing not found or no longer available: {url}")
         state = self._embedded_state(page)
         ld = self._ld_json(page)
 
@@ -1138,7 +1154,7 @@ def scrape(url: str, use_cache: bool = True, stealth: bool = False,
     try:
         data = attempt(stealth, use_cache)
     except ScraperError as e:
-        if stealth or e.code == "UNSUPPORTED_URL":
+        if stealth or e.code in ("UNSUPPORTED_URL", "LISTING_NOT_FOUND"):
             raise
         # automatic retry with the stealth browser on a fresh fetch
         try:
